@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scandoc"
+version = "0.1.0"
+authors = [
+  { name="Thomas Ascioglu", email="thomasascioglu@gmail.com" },
+]
+maintainers = [
+  { name="Thomas Ascioglu", email="thomasascioglu@gmail.com" },
+]
+description = "Detect and crop documents in an image."
+readme = "README.md"
+keywords = ["doc", "paper", "document", "scanner", "scan", "image", "crop", "detect"]
+license = { file="LICENSE" }
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dynamic = ["dependencies"]
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[project.scripts]
+scandoc = "scandoc.main_cli:main_cli"
+
+[project.urls]
+Homepage = "https://github.com/thomsan/scandoc"
+Issues = "https://github.com/thomsan/scandoc/issues"

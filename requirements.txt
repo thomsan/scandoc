@@ -1,0 +1,6 @@
+opencv-python==4.8.1.78
+imutils==0.5.4
+numpy==1.26.2
+rembg==2.0.52
+click==8.1.7
+matplotlib==3.8.2
