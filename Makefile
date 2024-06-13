@@ -2,16 +2,16 @@
 
 build: clean
 	python -m venv venv
-	python -m pip install build
+	pip install setuptools wheel build twine
 	python -m build
 
-install: build
-	pip install --force-reinstall dist/*.whl
+install: uninstall build
+	/usr/bin/pip install --force-reinstall dist/*.whl
 
 uninstall:
-	pip uninstall -y scandoc
+	/usr/bin/pip uninstall -y scandoc
 
-publish:
+publish: build
 	twine upload dist/*
 
 clean:
