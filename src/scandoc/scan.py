@@ -14,9 +14,17 @@ IMG_RESIZE_H = 500.0
 valid_formats = [".jpg", ".jpeg", ".jp2", ".png", ".bmp", ".tiff", ".tif"]
 
 
-def scan(img_path, output_path=None, interactive_mode=False):
+def scan(img_path: str, output_path: str | None = None, interactive_mode: bool = False):
+    """
+    Scan a single image and return the scanned image as a numpy array.
+    :param img_path: Path to the image to be scanned
+    :param output_path: Path to save the scanned image
+    :param interactive_mode: Flag for manually verifying and/or setting document corners
+    :return: Scanned image as a numpy array
+    """
+
     if os.path.splitext(img_path)[1].lower() not in valid_formats:
-        print("Invalid file format. Valid formats are: {}".format(valid_formats))
+        print(f"Invalid file format. Valid formats are: {valid_formats}")
         sys.exit(1)
 
     use_otsu = True
@@ -69,32 +77,54 @@ def scan(img_path, output_path=None, interactive_mode=False):
     return cv2.cvtColor(result, cv2.COLOR_BGR2RGB)
 
 
-def multi_scan(img_dir, output_dir=None, interactive_mode=False):
+def multi_scan(img_dir: str, output_dir: str | None = None, interactive_mode: bool = False) -> list:
+    """
+    Scan multiple images and return the scanned images as a list of PIL Images.
+    :param img_dir: Directory of images to be scanned
+    :param output_dir: Directory to save the scanned images
+    :param interactive_mode: Flag for manually verifying and/or setting document corners
+    :return: List of PIL Images
+    """
+
     img_files = [f for f in os.listdir(img_dir) if os.path.splitext(f)[1].lower() in valid_formats]
     images = []
     for img_f in img_files:
         if output_dir:
             scan(
-                os.path.join(img_dir, img_f),
+                img_path=os.path.join(img_dir, img_f),
                 output_path=os.path.join(output_dir, img_f),
                 interactive_mode=interactive_mode,
             )
         else:
-            output_img = scan(os.path.join(img_dir, img_f), interactive_mode)
+            output_img = scan(img_path=os.path.join(img_dir, img_f), interactive_mode=interactive_mode)
             images.append(Image.fromarray(output_img))
     if not output_dir:
         return images
 
 
-def scan2pdf(img_path, output_path, interactive_mode=False):
-    img = scan(img_path, interactive_mode)
+def scan2pdf(img_path: str, output_path: str, interactive_mode: bool = False):
+    """
+    Scan a single image and save the scanned image as a PDF.
+    :param img_path: Path to the image to be scanned
+    :param output_path: Path to save the scanned PDF
+    :param interactive_mode: Flag for manually verifying and/or setting document corners
+    """
+
+    image = Image.fromarray(scan(img_path=img_path, interactive_mode=interactive_mode))
     if not os.path.exists(os.path.dirname(output_path)):
         os.makedirs(os.path.dirname(output_path))
-    Image.fromarray(img).save(output_path, "PDF", resolution=100.0)
+    image.save(output_path, "PDF", resolution=100.0)
 
 
-def multi_scan2pdf(img_dir, output_path, interactive_mode=False):
-    images = multi_scan(img_dir, interactive_mode)
+def multi_scan2pdf(img_dir: str, output_path: str, interactive_mode: bool = False):
+    """
+    Scan multiple images and save the scanned images as a PDF.
+    :param img_dir: Directory of images to be scanned
+    :param output_path: Path to save the scanned PDF
+    :param interactive_mode: Flag for manually verifying and/or setting document corners
+    """
+
+    images = multi_scan(img_dir=img_dir, interactive_mode=interactive_mode)
     # scale images to same size
     widths, heights = zip(*(i.size for i in images))
     min_width = min(widths)
