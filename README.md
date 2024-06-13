@@ -6,6 +6,13 @@ The tool uses OpenCV to detect the document in the image and then uses a perspec
 
 ## Usage
 
+Install scandoc for the current user
+
+```
+make install
+```
+
+As soon as it is published on PyPI, you can install it using pip. Which is not the case yet.
 Install the package using pip
 
 ```
