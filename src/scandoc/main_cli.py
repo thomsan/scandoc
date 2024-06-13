@@ -31,7 +31,7 @@ def main_cli():
     args = vars(ap.parse_args())
     img_dir = args["images"]
     img_file_path = args["image"]
-    interactive_mode = args["i"]
+    interactive_mode = args["interactive"]
     pdf = args["pdf"]
     output_path = args["output"]
 
