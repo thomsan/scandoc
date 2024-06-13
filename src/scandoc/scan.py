@@ -87,6 +87,7 @@ def multi_scan(img_dir: str, output_dir: str | None = None, interactive_mode: bo
     """
 
     img_files = [f for f in os.listdir(img_dir) if os.path.splitext(f)[1].lower() in valid_formats]
+    img_files.sort()
     images = []
     for img_f in img_files:
         if output_dir:
