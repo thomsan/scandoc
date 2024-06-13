@@ -53,7 +53,8 @@ def scan(img_path, output_path=None, interactive_mode=False):
             outline = polygon.reshape(4, 2)
 
     if interactive_mode and outline.any():
-        outline = interactive_get_contour(outline, imutils.resize(orig, height=int(IMG_RESIZE_H)))
+        tmp_img = cv2.cvtColor(orig, cv2.COLOR_BGR2RGB)
+        outline = interactive_get_contour(outline, imutils.resize(tmp_img, height=int(IMG_RESIZE_H)))
 
     if outline is None:
         result = orig
@@ -65,7 +66,7 @@ def scan(img_path, output_path=None, interactive_mode=False):
             os.makedirs(os.path.dirname(output_path))
         cv2.imwrite(output_path, result)
 
-    return result
+    return cv2.cvtColor(result, cv2.COLOR_BGR2RGB)
 
 
 def multi_scan(img_dir, output_dir=None, interactive_mode=False):

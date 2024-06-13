@@ -5,13 +5,28 @@ from .scan import multi_scan, multi_scan2pdf, scan, scan2pdf
 
 
 def main_cli():
+    """
+    Command line interface for scanning documents.
+
+    Usage:
+    python -m src.scandoc.main_cli --images <img_dir> --output <output_dir>
+    python -m src.scandoc.main_cli --image <img_file> --output <output_file>
+    python -m src.scandoc.main_cli --images <img_dir> --pdf --output <output_file>
+    python -m src.scandoc.main_cli --image <img_file> --pdf --output <output_file>
+    python -m src.scandoc.main_cli --images <img_dir> --output <output_dir> --interactive
+    python -m src.scandoc.main_cli --image <img_file> --output <output_file> --interactive
+    python -m src.scandoc.main_cli --images <img_dir> --pdf --output <output_file> --interactive
+    python -m src.scandoc.main_cli --image <img_file> --pdf --output <output_file> --interactive
+    """
     ap = argparse.ArgumentParser()
     group = ap.add_mutually_exclusive_group(required=True)
     group.add_argument("--images", help="Directory of images to be scanned")
     group.add_argument("--image", help="Path to single image to be scanned")
-    ap.add_argument("-i", action="store_true", help="Flag for manually verifying and/or setting document corners")
-    ap.add_argument("-pdf", action="store_true", help="Flag for outputting a PDF instead of an image")
-    ap.add_argument("--output", help="Path to output file or directory")
+    ap.add_argument("-o", "--output", help="Path to output file or directory")
+    ap.add_argument(
+        "-i", "--interactive", action="store_true", help="Interactive mode for manually setting document corners"
+    )
+    ap.add_argument("-pdf", action="store_true", help="Save as pdf instead of image file")
 
     args = vars(ap.parse_args())
     img_dir = args["images"]
