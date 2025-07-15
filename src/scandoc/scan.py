@@ -3,6 +3,7 @@ import sys
 
 import cv2
 import imutils
+import numpy as np
 from imutils import perspective
 from PIL import Image
 
@@ -60,14 +61,15 @@ def scan(img_path: str, output_path: str | None = None, interactive_mode: bool =
         if len(polygon) == 4:
             outline = polygon.reshape(4, 2)
 
+    if outline is None:
+        h, w = img.shape
+        outline = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]])
+
     if interactive_mode and outline.any():
         tmp_img = cv2.cvtColor(orig, cv2.COLOR_BGR2RGB)
         outline = interactive_get_contour(outline, imutils.resize(tmp_img, height=int(IMG_RESIZE_H)))
 
-    if outline is None:
-        result = orig
-    else:
-        result = perspective.four_point_transform(orig, outline * ratio)
+    result = perspective.four_point_transform(orig, outline * ratio)
 
     if output_path:
         if not os.path.exists(os.path.dirname(output_path)):
