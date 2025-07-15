@@ -17,8 +17,10 @@ def interactive_get_contour(cnts, img):
     ax.add_patch(poly)
     ax.set_title(("Drag the corners of the box to the corners of the document. \n" "Close the window when finished."))
     p = PolygonInteractor(ax, poly)
-    # close the window when ESC is pressed
-    fig.canvas.mpl_connect("key_press_event", lambda event: [plt.close() if event.key == "escape" else None])
+    # close the window when ESC or Enter is pressed
+    fig.canvas.mpl_connect(
+        "key_press_event", lambda event: [plt.close() if event.key == "escape" or event.key == "enter" else None]
+    )
     plt.imshow(img)
     plt.show()
 
