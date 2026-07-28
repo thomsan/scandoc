@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel", "setuptools_scm"]
+requires = ["setuptools==83.0.0", "wheel==0.47.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -14,20 +14,20 @@ maintainers = [
 description = "Detect and crop documents in an image."
 readme = "README.md"
 keywords = ["doc", "paper", "document", "scanner", "scan", "image", "crop", "detect"]
-license = { file="LICENSE" }
-requires-python = ">=3.8"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "opencv-python==4.8.1.78",
     "imutils==0.5.4",
-    "numpy==1.26.2",
-    "rembg==2.0.67",
-    "click==8.1.8",
-    "matplotlib==3.8.2",
+    "matplotlib==3.10.8",
+    "numpy==2.3.5",
+    "opencv-python==4.13.0.92",
+    "pillow==12.3.0",
+    "scipy==1.17.1",
 ]
 
 [project.scripts]
