@@ -813,9 +813,8 @@ function App() {
       />
       {!draft ? (
         <main className="home">
-          <section className="hero">
+          <section className="home-actions">
             <div>
-              <h1>Documents</h1>
               <button className="primary" onClick={newDraft}>
                 <Icon name="plus" /> New document
               </button>
@@ -824,10 +823,9 @@ function App() {
               </button>
             </div>
           </section>
+          <details className="drafts" open={list.length > 0}>
+          <summary>Drafts <span>{list.length}</span></summary>
           <div className="section-title">
-            <h2>
-              Unfinished drafts <span>{list.length}</span>
-            </h2>
             <small>
               {(storage / 1024 / 1024).toFixed(1)} MB on this device
             </small>
@@ -863,10 +861,11 @@ function App() {
             ))}
           </div>
           {!list.length && (
-            <div className="empty-drafts">No unfinished drafts.</div>
+            <div className="empty-drafts">No drafts.</div>
           )}
-          <section className="history">
-            <h2>Recent deliveries</h2>
+          </details>
+          <details className="history">
+            <summary>History</summary>
             {jobs.length ? (
               jobs.map((job) => (
                 <div className="history-row" key={job.id}>
@@ -885,7 +884,7 @@ function App() {
                   </span>
                   {job.location?.startsWith("https://") && (
                     <a href={job.location} target="_blank" rel="noreferrer">
-                      Open destination ↗
+                      Open document ↗
                     </a>
                   )}
                   {job.error && <small>{job.error}</small>}
@@ -894,7 +893,7 @@ function App() {
             ) : (
               <p>No deliveries yet.</p>
             )}
-          </section>
+          </details>
         </main>
       ) : (
         <main className="workspace">
@@ -1231,15 +1230,6 @@ function App() {
                     <Icon name="upload" />
                   </div>
                   <h2>Add pages</h2>
-                  <button
-                    className="primary"
-                    onClick={() => files.current?.click()}
-                  >
-                    Choose images
-                  </button>
-                  <button onClick={() => camera.current?.click()}>
-                    <Icon name="camera" /> Take photo
-                  </button>
                   <small>
                     JPEG, PNG, WebP and TIFF · up to 25 MB per image
                   </small>
