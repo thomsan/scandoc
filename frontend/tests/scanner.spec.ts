@@ -1,6 +1,35 @@
 import { test, expect } from "@playwright/test";
 import { resolve } from "node:path";
 
+test("notes entered while a photo is decoding survive import and reload", async ({ page }) => {
+  await page.addInitScript(() => {
+    const original = window.createImageBitmap.bind(window);
+    const state = window as any;
+    window.createImageBitmap = (async (...args: any[]) => {
+      state.decodingPhoto = true;
+      await new Promise<void>((resolve) => { state.finishPhotoDecode = resolve; });
+      return original(...args as Parameters<typeof original>);
+    }) as typeof window.createImageBitmap;
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "New document", exact: true }).click();
+  await page.locator("input[type=file]").first().setInputFiles(resolve("../tests/fixtures/receipt.png"));
+  await expect.poll(() => page.evaluate(() => (window as any).decodingPhoto)).toBe(true);
+  const note = `Edited during photo import ${test.info().project.name}`;
+  // Reproduce an edit already accepted before the asynchronous busy guard
+  // becomes visible, keeping decoding paused to make the race deterministic.
+  await page.getByLabel("Note", { exact: true }).evaluate((input) => {
+    input.closest("fieldset")!.disabled = false;
+  });
+  await page.getByLabel("Note", { exact: true }).fill(note);
+  await page.evaluate(() => (window as any).finishPhotoDecode());
+  await expect(page.getByRole("button", { name: /^Page 1/ })).toBeVisible();
+  await expect(page.getByLabel("Note", { exact: true })).toHaveValue(note);
+  await expect.poll(async () => (await (await page.request.get("/api/v1/drafts")).json()).some((draft: any) => draft.note === note), { timeout: 20000 }).toBe(true);
+  await page.reload();
+  await expect(page.getByRole("heading", { name: note, exact: true })).toBeVisible();
+});
+
 test("capture, adjust corners, reorder, preview and download without losing the draft", async ({
   page,
 }) => {
