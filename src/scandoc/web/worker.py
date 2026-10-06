@@ -116,6 +116,11 @@ def process(store, row, processing_slot=None):
 
 def run(settings, stop, processing_slot=None):
     store = Store(settings)
+    # No writer is active before this instance's sole worker starts. Discard
+    # interrupted temporary PDFs; committed PDFs and source pages remain intact.
+    for pattern in ("*/*.pending", "*/.*.pending.*.tmp"):
+        for temporary in (settings.data_dir / "drafts").glob(pattern):
+            temporary.unlink(missing_ok=True)
     with store.connect() as db:
         db.execute("UPDATE jobs SET status='queued' WHERE status='processing'")
         for row in db.execute("SELECT draft,owner FROM jobs WHERE status='delivered'").fetchall():

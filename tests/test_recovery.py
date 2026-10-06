@@ -52,11 +52,16 @@ def row(store, job):
 
 def test_interrupted_processing_restarts(tmp_path):
     app, client, draft, job = queued(tmp_path)
+    directory = tmp_path / 'drafts' / draft
+    leftovers = [directory / (job+'.pending'), directory / ('.'+job+'.pending.abandoned.tmp')]
+    for temporary in leftovers:
+        temporary.write_bytes(b'%PDF-interrupted')
     with app.state.store.connect() as db:
         db.execute("UPDATE jobs SET status='processing' WHERE id=?", (job,))
     run_worker_until(app.state.store, job, 'ready')
     assert client.get(f'/api/v1/jobs/{job}/download').content.startswith(b'%PDF')
     assert client.get(f'/api/v1/drafts/{draft}').status_code == 200
+    assert all(not temporary.exists() for temporary in leftovers)
 
 
 def test_full_storage_retains_sources_and_retry_recovers(tmp_path, monkeypatch):
