@@ -73,6 +73,8 @@ def test_description_confirmation_failure_retains_draft_and_never_resends(tmp_pa
         if path == 'documents/42/':
             return {'title':'Shop - Cables','created':'2026-10-06',
                     'custom_fields':[{'field':5,'value':'Cables' if confirmed[0] else 'different'}]}
+        if path == 'documents/42/metadata/':
+            return {'media_filename':'2026-10-06 Shop - Cables_01.pdf'}
         raise AssertionError(path)
     monkeypatch.setattr(worker, 'paperless', upstream)
     with pytest.raises(UncertainDelivery, match='Description needs review'):
@@ -84,7 +86,7 @@ def test_description_confirmation_failure_retains_draft_and_never_resends(tmp_pa
     assert len(uploads) == 1
     result = store.job(job,'local')
     assert result['status'] == 'delivered'
-    assert result['archive']['filename'] == '2026-10-06 Shop - Cables.pdf'
+    assert result['archive']['filename'] == '2026-10-06 Shop - Cables_01.pdf'
     assert client.get(f'/api/v1/drafts/{draft}').status_code == 404
 
 

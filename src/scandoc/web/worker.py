@@ -132,9 +132,9 @@ def process(store, row, processing_slot=None):
             confirmed = next((f.get("value") for f in archived.get("custom_fields", []) if f["field"] == value["description_field"]), None)
             if confirmed != value["metadata"]["description"]:
                 raise UncertainDelivery("Document ingested; Description needs review. No PDF will be resent.")
-            from .naming import export_filename
+            files = paperless(settings, token, "GET", f"documents/{value['document_id']}/metadata/")
             value["archive"] = {"title": archived["title"], "created": archived["created"],
-                                "filename": export_filename(archived["created"], archived["title"])}
+                                "filename": Path(files["media_filename"]).name}
         note = str(value["metadata"].get("note", value["metadata"].get("title", "")) or "").strip()
         if note:
             # Persist the document ID before adding a note: restart/retry must
