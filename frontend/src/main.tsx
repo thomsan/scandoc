@@ -574,6 +574,10 @@ function App() {
         height = p.height;
         await api(`/drafts/${current.id}/pages/${id}`, { method: "DELETE" });
       }
+      // Decoding may take long enough for the user to edit document details.
+      // Append to the latest draft rather than overwriting those edits with
+      // the snapshot captured before decoding started.
+      if (latest.current?.id === current.id) current = latest.current;
       current = {
         ...current,
         pages: [
