@@ -56,6 +56,43 @@ def test_upload_edit_preview_pdf_idempotency(application,client):
     assert client.get(f'/api/v1/jobs/{job}/download').status_code==404
 
 
+def test_destination_export_requirements_and_generated_name(application, client):
+    draft, _, _ = make_draft(client)
+    job = str(uuid4())
+    body = {'id':job, 'destination':'download', 'filename':'ignored.pdf',
+            'metadata':{'description':'Extension cables / workshop'}}
+    assert client.post(f'/api/v1/drafts/{draft}/jobs',json=body).status_code == 422
+    body['metadata']['created'] = '2026-02-30'
+    assert client.post(f'/api/v1/drafts/{draft}/jobs',json=body).status_code == 422
+    body['metadata']['created'] = '2026-10-06'
+    assert client.post(f'/api/v1/drafts/{draft}/jobs',json=body).status_code == 200
+    run_job(application, job)
+    result = client.get(f'/api/v1/jobs/{job}').json()
+    assert result['filename'] == '2026-10-06 Extension cables - workshop.pdf'
+    assert client.post(f'/api/v1/drafts/{draft}/jobs',json=body).json()['status'] == 'ready'
+    assert '2026-10-06' in client.get(f'/api/v1/jobs/{job}/download').headers['content-disposition']
+
+
+def test_description_folder_name_and_collision_preserve_draft(application, client, tmp_path):
+    root = tmp_path/'output'
+    client.put('/api/v1/admin/destinations/archive',json={'kind':'folder','name':'Archive','root':str(root)}).raise_for_status()
+    draft, _, _ = make_draft(client)
+    job = str(uuid4())
+    body = {'id':job,'destination':'archive','metadata':{'description':'Cables','created':'2026-10-06'}}
+    client.post(f'/api/v1/drafts/{draft}/jobs',json=body).raise_for_status()
+    run_job(application,job)
+    target = root/'2026-10-06 Cables.pdf'
+    assert target.read_bytes().startswith(b'%PDF')
+    draft, _, _ = make_draft(client)
+    job = str(uuid4())
+    target.write_bytes(b'existing different document')
+    client.post(f'/api/v1/drafts/{draft}/jobs',json={**body,'id':job}).raise_for_status()
+    with pytest.raises(ValueError, match='different file'):
+        run_job(application,job)
+    assert client.get(f'/api/v1/drafts/{draft}').status_code == 200
+    assert target.read_bytes() == b'existing different document'
+
+
 def test_folder_delivery_cleanup_and_repeated_request(application,client,tmp_path):
     destination={'kind':'folder','name':'Archive','root':str(tmp_path/'output')}
     assert client.put('/api/v1/admin/destinations/archive',json=destination).status_code==200

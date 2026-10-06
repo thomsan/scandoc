@@ -50,6 +50,44 @@ def row(store, job):
         return dict(db.execute('SELECT * FROM jobs WHERE id=?', (job,)).fetchone())
 
 
+def test_description_confirmation_failure_retains_draft_and_never_resends(tmp_path, monkeypatch):
+    app, client, draft, job = queued(tmp_path, 'paperless')
+    store = app.state.store
+    value = json.loads(row(store, job)['value'])
+    value['metadata'] = {'description':'Cables', 'document_type':1}
+    worker.update(store, job, 'queued', value)
+    uploads = []
+    confirmed = [False]
+    def upstream(settings, token, method, path, **kwargs):
+        if path == 'document_types/1/':
+            return {'id':1}
+        if path == 'custom_fields/':
+            return {'results':[{'id':5,'name':'Description','data_type':'string'}]}
+        if path == 'documents/post_document/':
+            uploads.append(path)
+            assert json.loads(kwargs['data']['custom_fields']) == {'5':'Cables'}
+            assert 'created' not in kwargs['data'] and 'title' not in kwargs['data']
+            return 'task'
+        if path == 'tasks/':
+            return {'results':[{'status':'SUCCESS','related_document':42}]}
+        if path == 'documents/42/':
+            return {'title':'Shop - Cables','created':'2026-10-06',
+                    'custom_fields':[{'field':5,'value':'Cables' if confirmed[0] else 'different'}]}
+        raise AssertionError(path)
+    monkeypatch.setattr(worker, 'paperless', upstream)
+    with pytest.raises(UncertainDelivery, match='Description needs review'):
+        worker.process(store, row(store,job))
+    assert client.get(f'/api/v1/drafts/{draft}').status_code == 200
+    assert store.job(job,'local')['document_id'] == 42
+    confirmed[0] = True
+    worker.process(store, row(store,job))
+    assert len(uploads) == 1
+    result = store.job(job,'local')
+    assert result['status'] == 'delivered'
+    assert result['archive']['filename'] == '2026-10-06 Shop - Cables.pdf'
+    assert client.get(f'/api/v1/drafts/{draft}').status_code == 404
+
+
 def test_interrupted_processing_restarts(tmp_path):
     app, client, draft, job = queued(tmp_path)
     directory = tmp_path / 'drafts' / draft

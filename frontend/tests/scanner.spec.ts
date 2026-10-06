@@ -18,13 +18,13 @@ test("notes entered while a photo is decoding survive import and reload", async 
   const note = `Edited during photo import ${test.info().project.name}`;
   // Reproduce an edit already accepted before the asynchronous busy guard
   // becomes visible, keeping decoding paused to make the race deterministic.
-  await page.getByLabel("Note", { exact: true }).evaluate((input) => {
+  await page.getByLabel("Description", { exact: true }).evaluate((input) => {
     input.closest("fieldset")!.disabled = false;
   });
-  await page.getByLabel("Note", { exact: true }).fill(note);
+  await page.getByLabel("Description", { exact: true }).fill(note);
   await page.evaluate(() => (window as any).finishPhotoDecode());
   await expect(page.getByRole("button", { name: /^Page 1/ })).toBeVisible();
-  await expect(page.getByLabel("Note", { exact: true })).toHaveValue(note);
+  await expect(page.getByLabel("Description", { exact: true })).toHaveValue(note);
   await expect.poll(async () => (await (await page.request.get("/api/v1/drafts")).json()).some((draft: any) => draft.note === note), { timeout: 20000 }).toBe(true);
   await page.reload();
   await expect(page.getByRole("heading", { name: note, exact: true })).toBeVisible();
@@ -51,15 +51,16 @@ test("capture, adjust corners, reorder, preview and download without losing the 
   await page.getByRole("button", { name: "Preview", exact: true }).click();
   await expect(page.getByAltText("Corrected document preview")).toBeVisible();
   await page
-    .getByLabel("Note", { exact: true })
+    .getByLabel("Description", { exact: true })
     .fill(`Office supplies ${test.info().project.name}`);
+  await page.getByLabel("Document date", { exact: true }).fill("2026-10-06");
   await page.getByRole("button", { name: "Create PDF", exact: true }).click();
   await expect(page.getByRole("link", { name: "Download PDF" })).toBeVisible({
     timeout: 20000,
   });
   const download = page.waitForEvent("download");
   await page.getByRole("link", { name: "Download PDF" }).click();
-  expect((await download).suggestedFilename()).toBe("document.pdf");
+  expect((await download).suggestedFilename()).toBe(`2026-10-06 Office supplies ${test.info().project.name}.pdf`);
   await page
     .getByRole("button", { name: "← All documents", exact: true })
     .click();
@@ -87,8 +88,9 @@ test("installed shell and edited draft survive offline reload", async ({
     .first()
     .setInputFiles(resolve("../tests/fixtures/receipt.png"));
   await page
-    .getByLabel("Note", { exact: true })
+    .getByLabel("Description", { exact: true })
     .fill(`Offline receipt ${test.info().project.name}`);
+  await page.getByLabel("Document date", { exact: true }).fill("2026-10-06");
   await page.waitForTimeout(1800);
   await context.setOffline(true);
   await page.getByRole("slider", { name: "Corner 1", exact: true }).focus();
@@ -104,7 +106,7 @@ test("installed shell and edited draft survive offline reload", async ({
     })
     .getByRole("button", { name: "Continue", exact: false })
     .click();
-  await expect(page.getByLabel("Note", { exact: true })).toHaveValue(
+  await expect(page.getByLabel("Description", { exact: true })).toHaveValue(
     `Offline receipt ${test.info().project.name}`,
   );
   await expect(
@@ -201,4 +203,21 @@ test("home is compact and page capture controls appear once", async ({ page }) =
   await expect(page.getByRole("button", { name: "Choose images", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "← All documents", exact: true }).click();
   await expect(drafts).toHaveAttribute("open", "");
+});
+
+test("direct export requires date and description and previews a safe filename", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "New document", exact: true }).click();
+  await page.locator("input[type=file]").first().setInputFiles(resolve("../tests/fixtures/receipt.png"));
+  await expect(page.getByLabel("Document type", { exact: true })).toHaveCount(0);
+  const save = page.getByRole("button", { name: "Create PDF", exact: true });
+  await expect(save).toBeDisabled();
+  await page.getByLabel("Description", { exact: true }).fill("Cables / Workshop");
+  await expect(save).toBeDisabled();
+  await page.getByLabel("Document date", { exact: true }).fill("2026-10-06");
+  await expect(save).toBeEnabled();
+  await expect(page.locator(".export-filename")).toHaveText("2026-10-06 Cables - Workshop.pdf");
+  await page.getByText("More options", { exact: true }).click();
+  for (const name of ["PDF filename", "Correspondent", "Tags"])
+    await expect(page.getByLabel(name, { exact: true })).toHaveCount(0);
 });
