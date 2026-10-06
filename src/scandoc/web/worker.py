@@ -38,7 +38,7 @@ def process(store, row):
             for page in draft["pages"]:
                 yield correct_image(load_image(directory / (page["id"] + ".png"), settings.max_pixels), page["corners"], page.get("rotation", 0), page.get("mode", "color"))
         temporary_pdf = pdf.with_suffix(".pending")
-        write_pdf(pages(), temporary_pdf, value["page_size"])
+        write_pdf(pages(), temporary_pdf, value["page_size"], max_bytes=settings.max_document_bytes)
         with temporary_pdf.open("rb") as completed_pdf:
             os.fsync(completed_pdf.fileno())
         os.replace(temporary_pdf, pdf)

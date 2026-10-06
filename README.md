@@ -116,3 +116,5 @@ Code is based on:
 - [danielgatis/docscan](https://github.com/danielgatis/docscan/tree/master)
 - [endalk200
   /document-scanner](https://github.com/endalk200/document-scanner/tree/main)
+
+PDF pages are written sequentially to disk to bound memory. Color pages use JPEG quality 95 at the full corrected resolution; grayscale and document-cleanup pages use lossless compression. Hosted PDFs also respect the configured document byte limit.

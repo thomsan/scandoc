@@ -82,3 +82,18 @@ def test_supported_formats_and_retained_text_region(format):
     normalized=load_image(raw)
     corrected=correct_image(normalized,[[0,0],[199,0],[199,399],[0,399]])
     assert np.asarray(corrected)[100:295,60:135].mean() < 8
+
+
+def test_pdf_embedded_images_quality_order_and_byte_limit(tmp_path):
+    color=Image.new('RGB',(200,400),'white')
+    ImageDraw.Draw(color).rectangle((60,100,140,300),fill='black')
+    gray=color.convert('L')
+    path=tmp_path/'quality.pdf'
+    write_pdf(iter([color,gray]),path)
+    pages=PdfReader(path).pages
+    assert pages[0].images[0].image.size == color.size
+    assert np.asarray(pages[0].images[0].image)[105:295,65:135].mean() < 3
+    assert np.array_equal(np.asarray(pages[1].images[0].image),np.asarray(gray))
+    with pytest.raises(ValueError,match='document byte limit'):
+        write_pdf([color],tmp_path/'too-large.pdf',max_bytes=100)
+    assert not (tmp_path/'too-large.pdf').exists()

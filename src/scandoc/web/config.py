@@ -2,6 +2,7 @@ from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from cryptography.fernet import Fernet
 import json
+import ssl
 
 
 class Settings(BaseSettings):
@@ -34,6 +35,11 @@ class Settings(BaseSettings):
                 path.chmod(0o600)
             self.encryption_key = path.read_text().strip()
         Fernet(self.encryption_key.encode())
+        if self.ca_file:
+            try:
+                ssl.create_default_context(cafile=self.ca_file)
+            except (OSError, ssl.SSLError) as exc:
+                raise ValueError("The configured public CA certificate must be readable and valid") from exc
 
     def configured_destinations(self):
         result = {"download": {"id": "download", "name": "Download to device", "kind": "download", "readonly": True}}

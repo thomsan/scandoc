@@ -1,18 +1,20 @@
 """Document geometry shared by the CLI, desktop editor and web service."""
 from pathlib import Path
+import io
+import zlib
 
 import cv2
 import numpy as np
 from PIL import Image, ImageOps
-from reportlab.pdfgen import canvas
-from reportlab.lib.utils import ImageReader
 
 valid_formats = [".jpg", ".jpeg", ".jp2", ".png", ".bmp", ".webp", ".tiff", ".tif"]
 
 
-def load_image(source, max_pixels=24_000_000):
+def load_image(source, max_pixels=24_000_000, allowed_formats=None):
     try:
         with Image.open(source) as image:
+            if allowed_formats is not None and image.format not in allowed_formats:
+                raise ValueError("Unsupported image; use JPEG, PNG, WebP or TIFF")
             if image.width * image.height > max_pixels:
                 raise ValueError("Image exceeds the pixel limit")
             return ImageOps.exif_transpose(image).convert("RGB")
@@ -75,28 +77,77 @@ def correct_image(image, corners=None, rotation=0, mode="color"):
     return Image.fromarray(result).rotate(-rotation, expand=True)
 
 
-def write_pdf(images, output_path, page_size="natural"):
+def write_pdf(images, output_path, page_size="natural", max_bytes=None):
+    """Write each page directly to disk without retaining previous image streams.
+
+    Color pages use high-quality JPEG; grayscale/cleanup pages remain lossless.
+    PDF object offsets and page references are the only per-document state.
+    """
     if page_size not in ("natural", "a4"):
         raise ValueError("Unknown PDF page size")
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    pdf = canvas.Canvas(str(output_path), invariant=1)
-    count = 0
-    for image in images:
-        width, height = image.size
-        if page_size == "a4":
-            pw, ph = (595.28, 841.89) if width <= height else (841.89, 595.28)
-            scale = min((pw-36)/width, (ph-36)/height)
-            dw, dh = width*scale, height*scale
-        else:
-            pw, ph = width * 72/300, height * 72/300
-            dw, dh = pw, ph
-        pdf.setPageSize((pw, ph))
-        pdf.drawImage(ImageReader(image), (pw-dw)/2, (ph-dh)/2, dw, dh)
-        pdf.showPage()
-        count += 1
-    if not count:
-        raise ValueError("No images to export")
-    pdf.save()
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    offsets = {}
+    pages = []
+    try:
+        with path.open("wb") as output:
+            def write(data):
+                if max_bytes is not None and output.tell() + len(data) > max_bytes:
+                    raise ValueError("Generated PDF exceeds the document byte limit; reduce the number or size of pages")
+                output.write(data)
+
+            def object(number, body, stream=None):
+                offsets[number] = output.tell()
+                write(f"{number} 0 obj\n".encode() + body)
+                if stream is not None:
+                    write(b"\nstream\n")
+                    write(stream)
+                    write(b"\nendstream")
+                write(b"\nendobj\n")
+
+            write(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+            object(1, b"<< /Type /Catalog /Pages 2 0 R >>")
+            for image in images:
+                width, height = image.size
+                if page_size == "a4":
+                    pw, ph = (595.28, 841.89) if width <= height else (841.89, 595.28)
+                    scale = min((pw-36)/width, (ph-36)/height)
+                    dw, dh = width*scale, height*scale
+                else:
+                    pw, ph = width * 72/300, height * 72/300
+                    dw, dh = pw, ph
+                image_id = 3 + len(pages)*3
+                if image.mode in ("1", "L"):
+                    content = zlib.compress(image.convert("L").tobytes())
+                    space, filter_name = "DeviceGray", "FlateDecode"
+                else:
+                    encoded = io.BytesIO()
+                    image.convert("RGB").save(encoded, "JPEG", quality=95)
+                    content = encoded.getvalue()
+                    space, filter_name = "DeviceRGB", "DCTDecode"
+                    encoded.close()
+                object(image_id, (f"<< /Type /XObject /Subtype /Image /Width {width} /Height {height} "
+                                 f"/ColorSpace /{space} /BitsPerComponent 8 /Filter /{filter_name} /Length {len(content)} >>").encode(), content)
+                del content
+                commands = f"q {dw:.6f} 0 0 {dh:.6f} {(pw-dw)/2:.6f} {(ph-dh)/2:.6f} cm /Image Do Q\n".encode()
+                object(image_id+1, f"<< /Length {len(commands)} >>".encode(), commands)
+                page_id = image_id+2
+                object(page_id, (f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {pw:.6f} {ph:.6f}] "
+                                 f"/Resources << /XObject << /Image {image_id} 0 R >> >> /Contents {image_id+1} 0 R >>").encode())
+                pages.append(page_id)
+            if not pages:
+                raise ValueError("No images to export")
+            references = " ".join(f"{number} 0 R" for number in pages)
+            object(2, f"<< /Type /Pages /Count {len(pages)} /Kids [{references}] >>".encode())
+            start = output.tell()
+            size = max(offsets) + 1
+            write(f"xref\n0 {size}\n0000000000 65535 f \n".encode())
+            for number in range(1, size):
+                write(f"{offsets[number]:010d} 00000 n \n".encode())
+            write(f"trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{start}\n%%EOF\n".encode())
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
 
 
 def scan(img_path: str, output_path: str | None = None, interactive_mode: bool = False):

@@ -289,10 +289,12 @@ function App() {
     void navigator.storage?.estimate().then((e) => setStorage(e.usage || 0));
   }, [list]);
   async function persist(next: Draft) {
+    // Update the current snapshot synchronously: an older IndexedDB write must
+    // never replace a newer keystroke or corner edit when its promise resolves.
+    latest.current = next;
+    setDraft(next);
     try {
       await db.save(next);
-      setDraft(next);
-      latest.current = next;
       setList(await db.drafts(next.owner));
     } catch {
       throw new Error(
@@ -578,8 +580,8 @@ function App() {
     setJobs(await api("/jobs"));
   }
   function modify(patch: Partial<Draft>) {
-    if (draft)
-      void persist({ ...draft, ...patch }).catch((e) => setError(e.message));
+    if (latest.current)
+      void persist({ ...latest.current, ...patch }).catch((e) => setError(e.message));
   }
   async function discard(item: Draft) {
     if (!window.confirm("Delete this draft and its images?")) return;

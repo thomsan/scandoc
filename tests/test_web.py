@@ -162,3 +162,25 @@ def test_upstream_login_rate_limit_is_actionable(tmp_path, monkeypatch):
     assert response.status_code==429
     assert response.headers['Retry-After']=='30'
     assert 'Wait' in response.json()['detail']
+
+
+@pytest.mark.parametrize('format',['GIF','BMP'])
+def test_web_rejects_unsupported_image_formats(client,format):
+    draft=str(uuid4());client.post('/api/v1/drafts',json={'id':draft})
+    raw=io.BytesIO();Image.new('RGB',(100,150)).save(raw,format)
+    result=client.put(f'/api/v1/drafts/{draft}/pages/{uuid4()}',files={'file':('disguised.png',raw.getvalue(),'image/png')})
+    assert result.status_code == 422
+    assert 'Unsupported image' in result.json()['detail']
+    assert not client.get(f'/api/v1/drafts/{draft}').json()['pages']
+
+
+def test_page_and_document_limits_preserve_draft(application,client):
+    draft,_,page=make_draft(client)
+    application.state.settings.max_pages=1
+    raw=io.BytesIO();Image.new('RGB',(100,150)).save(raw,'PNG')
+    url=f'/api/v1/drafts/{draft}/pages/{uuid4()}'
+    assert client.put(url,files={'file':('receipt.png',raw.getvalue())}).status_code==413
+    application.state.settings.max_pages=20
+    application.state.settings.max_document_bytes=page['bytes']
+    assert client.put(url,files={'file':('receipt.png',raw.getvalue())}).status_code==413
+    assert len(client.get(f'/api/v1/drafts/{draft}').json()['pages'])==1
