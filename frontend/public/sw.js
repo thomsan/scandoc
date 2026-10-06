@@ -18,6 +18,7 @@ self.addEventListener("install", (event) =>
         "/icon-512.png",
       ]);
       await cache.put("/", html);
+      await self.skipWaiting();
     })(),
   ),
 );

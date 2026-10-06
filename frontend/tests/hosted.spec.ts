@@ -67,6 +67,7 @@ for (const destination of [
 ]) {
   test(`hosted upload, corners, reorder, preview and ${destination}`, async ({
     page,
+    context,
   }) => {
     test.setTimeout(240000);
     await login(page, "admin");
@@ -145,8 +146,10 @@ for (const destination of [
       await expect(archive).toHaveURL(delivered.location);
       await expect(archive.locator("pngx-document-detail")).toBeVisible({ timeout: 20000 });
       await archive.close();
+      await context.setOffline(true);
       await page.reload();
       await expect(page.getByRole("button", { name: "New document", exact: true })).toBeVisible();
+      await context.setOffline(false);
     }
   });
 }
