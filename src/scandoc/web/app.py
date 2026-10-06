@@ -245,7 +245,7 @@ def create_app(settings=None):
         raw = file.file.read(settings.max_image_bytes+1)
         if len(raw) > settings.max_image_bytes or sum(p["bytes"] for p in draft["pages"]) + len(raw) > settings.max_document_bytes:
             raise HTTPException(413, "Image or document byte limit exceeded")
-        image = load_image(io.BytesIO(raw), settings.max_pixels)
+        image = load_image(io.BytesIO(raw), settings.max_pixels, allowed_formats={"JPEG", "PNG", "WEBP", "TIFF"})
         page = {"id": page_id, "width": image.width, "height": image.height, "corners": detect_corners(image), "rotation": 0, "mode": "color", "bytes": len(raw)}
         path = settings.data_dir / "drafts" / draft["id"] / (page_id + ".png")
         image.save(path)
