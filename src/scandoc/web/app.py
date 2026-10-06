@@ -24,6 +24,7 @@ from .config import Settings
 from .store import Store
 from .delivery import paperless, results, validate_destination, client
 from .worker import start
+from .naming import export_filename
 
 
 class Login(BaseModel):
@@ -350,7 +351,17 @@ def create_app(settings=None):
             raise ValueError("Unknown destination")
         if body.page_size not in ("natural", "a4") or not re.fullmatch(r"[\w .()-]+\.pdf", body.filename) or body.filename.startswith("."):
             raise ValueError("Choose a safe PDF filename and page size")
-        allowed = {"note", "title", "created", "document_type", "tags", "correspondent"}
+        allowed = {"description", "note", "title", "created", "document_type", "tags", "correspondent"}
+        if "description" in body.metadata:
+            description = body.metadata["description"]
+            if not isinstance(description, str) or len(description) > 128:
+                raise ValueError("Description must be text of at most 128 characters")
+            if store.destinations()[body.destination]["kind"] == "paperless":
+                if not body.metadata.get("document_type"):
+                    raise ValueError("Choose a document type")
+                body.filename = "document.pdf"
+            else:
+                body.filename = export_filename(body.metadata.get("created"), description)
         if "note" in body.metadata and (not isinstance(body.metadata["note"], str) or len(body.metadata["note"]) > 2000):
             raise ValueError("Note must be text of at most 2000 characters")
         if set(body.metadata) - allowed:

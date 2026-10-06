@@ -54,15 +54,21 @@ instead of silently dropping pages. Device downloads retain drafts until deletio
 confirmed folder, WebDAV and Paperless delivery delete server and phone source files.
 An uncertain Paperless upload must be reconciled before any resend.
 
-The scanner's main save form contains an optional **Note**, document type and
-destination. Extra export settings are under **More options**. Paperless extracts
-the document date and manages its title through archive workflows; Scandoc does
-not submit title or date overrides. Notes are added with the uploader's identity
-after ingestion and reconciled before cleanup, including after a lost response.
-Older drafts retain their former title as the Note. For older API clients,
-`metadata.title` also becomes a note and `metadata.created` does not override the
-Paperless date. Status phases distinguish PDF creation, transfer and Paperless
-reading; delivery records include their measured durations.
+The save form follows the selected destination. Paperless requires a document
+type and accepts an optional **Description**, such as “Extension cables” for a
+receipt. Its company archive owns OCR date extraction, title policy and filenames;
+Scandoc attaches the dedicated Description custom field before ingestion and
+confirms it before deleting sources. The delivery receipt shows the resulting
+archive filename. Download, folder and WebDAV exports require a document date
+and Description and generate `YYYY-MM-DD DESCRIPTION.pdf`, with safe characters.
+A conflicting folder/WebDAV name fails without overwriting or deleting the draft.
+Paperless identifiers and credentials are never used for these direct exports.
+Page sizing and administrator type creation remain under **More options**.
+
+Older drafts preserve their entered Note/title as Description. Older API clients
+can still submit `metadata.note` or `metadata.title` as an authored Paperless note;
+their explicit export filenames remain supported. New clients send
+`metadata.description` and, only for direct exports, `metadata.created`.
 
 Run `pytest tests` and `npm run test:e2e --prefix frontend` after building the UI.
 Hosted browser tests use `SCANDOC_TEST_URL` and the disposable back-office fixture's

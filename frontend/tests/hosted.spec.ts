@@ -93,9 +93,8 @@ for (const destination of [
       .click();
     await page.getByRole("button", { name: "Preview", exact: true }).click();
     await expect(page.getByAltText("Corrected document preview")).toBeVisible();
-    await page
-      .getByLabel("Note", { exact: true })
-      .fill(`Hosted ${destination} ${test.info().project.name} ${Date.now()}`);
+    const description = `Hosted ${destination} ${test.info().project.name} ${Date.now()}`;
+    await page.getByLabel("Description", { exact: true }).fill(description);
     await page
       .getByRole("combobox", { name: "Destination", exact: true })
       .selectOption(destination);
@@ -103,6 +102,7 @@ for (const destination of [
       await page
         .getByRole("combobox", { name: "Document type", exact: true })
         .selectOption({ label: "Receipt" });
+    else await page.getByLabel("Document date", { exact: true }).fill("2026-10-06");
     const created = page.waitForResponse(
       (r: any) => r.url().endsWith("/jobs") && r.request().method() === "POST",
     );
@@ -128,7 +128,7 @@ for (const destination of [
       ).toBeVisible();
       const event = page.waitForEvent("download");
       await page.getByRole("link", { name: "Download PDF" }).click();
-      expect((await event).suggestedFilename()).toBe("document.pdf");
+      expect((await event).suggestedFilename()).toBe(`2026-10-06 ${description}.pdf`);
     } else
       await expect(
         page.getByRole("button", { name: "New document", exact: true }),
@@ -164,7 +164,7 @@ test("logout hides retained drafts; another account cannot read them; same accou
     .first()
     .setInputFiles(resolve("../tests/fixtures/receipt.png"));
   const name = `Private draft ${test.info().project.name} ${Date.now()}`;
-  await page.getByLabel("Note", { exact: true }).fill(name);
+  await page.getByLabel("Description", { exact: true }).fill(name);
   await expect
     .poll(
       async () => {
@@ -207,6 +207,8 @@ test("failed destination retains draft and expired session prompts login", async
   await page
     .getByRole("combobox", { name: "Destination", exact: true })
     .selectOption("browser-unavailable");
+  await page.getByLabel("Document date", { exact: true }).fill("2026-10-06");
+  await page.getByLabel("Description", { exact: true }).fill("Unavailable export");
   await page
     .getByRole("button", { name: "Save document", exact: true })
     .click();

@@ -24,6 +24,7 @@ type Destination = {
 type Job = {
   id: string;
   filename: string;
+  archive?: { title: string; created: string; filename: string };
   destination: string;
   status: string;
   download?: string;
@@ -36,12 +37,17 @@ function jobStatus(job: Job) {
     return "Sending to Paperless…";
   if (job.status === "processing" || job.status === "waiting") {
     if (job.phase === "upload") return "Sending to Paperless…";
-    if (job.phase === "note") return "Saving note…";
+    if (job.phase === "note" || job.phase === "description") return "Saving description…";
     if (job.phase === "ocr" || job.status === "waiting")
       return "Reading in Paperless…";
     return "Creating PDF…";
   }
   return job.status;
+}
+function filenameDescription(description: string) {
+  let label = description.replace(/[^\p{L}\p{N}_ .()-]/gu, "-").replace(/\s+/g, " ").slice(0, 128).trim();
+  while (new TextEncoder().encode(label).length > 180) label = Array.from(label).slice(0, -1).join("");
+  return label;
 }
 let csrf = "";
 let authRevision = 0;
@@ -83,7 +89,7 @@ async function api(path: string, options: RequestInit = {}) {
           ? body.detail
           : JSON.stringify(body.detail);
     } catch {}
-    throw new Error(message);
+    throw Object.assign(new Error(message), { status: response.status });
   }
   return response.headers.get("content-type")?.includes("application/json")
     ? response.json()
@@ -216,6 +222,7 @@ function App() {
               d.find((x: Destination) => x.default)?.id || "download",
             pageSize: "natural",
             ...entry,
+            created: typeof entry.created === "string" && /^\d{4}-\d{2}-\d{2}$/.test(entry.created) ? entry.created : undefined,
             owner: current.owner,
             pages,
           });
@@ -630,6 +637,7 @@ function App() {
   }
   async function send() {
     if (!draft) return;
+    if (!saveDetailsValid) throw new Error(usesPaperless ? "Choose a document type" : "Enter a date and description");
     const next = await sync(draft);
     await persist(next);
     const jobId = next.jobId && !currentJob ? next.jobId : crypto.randomUUID();
@@ -639,22 +647,27 @@ function App() {
         : {
             id: jobId,
             destination: next.destination,
-            filename: next.filename,
+            filename: "document.pdf",
             page_size: next.pageSize,
             metadata: {
-              note: next.note,
-              document_type: next.type ? Number(next.type) : undefined,
-              tags: next.tags,
-              correspondent: next.correspondent
-                ? Number(next.correspondent)
-                : undefined,
+              description: next.note.trim(),
+              ...(usesPaperless
+                ? { document_type: Number(next.type) }
+                : { created: next.created }),
             },
           };
     await persist({ ...next, jobId, jobRequest: request });
-    await api(`/drafts/${next.id}/jobs`, {
-      method: "POST",
-      body: json(request),
-    });
+    try {
+      await api(`/drafts/${next.id}/jobs`, {
+        method: "POST",
+        body: json(request),
+      });
+    } catch (error: any) {
+      // A validation rejection did not enqueue a delivery. Allow corrected
+      // details to create a new request; retain the ID for ambiguous responses.
+      if (error.status === 422) await persist({ ...next, jobId: undefined, jobRequest: undefined });
+      throw error;
+    }
     setJobs(await api("/jobs"));
   }
   function modify(patch: Partial<Draft>) {
@@ -677,6 +690,10 @@ function App() {
     if (draft?.id === item.id) setDraft(null);
     setList(await db.drafts(item.owner));
   }
+  const usesPaperless = destinations.find((d) => d.id === draft?.destination)?.kind === "paperless";
+  const description = draft?.note.trim() || "";
+  const generatedFilename = usesPaperless ? "document.pdf" : `${draft?.created || "YYYY-MM-DD"} ${filenameDescription(description) || "Description"}.pdf`;
+  const saveDetailsValid = usesPaperless ? !!draft?.type : !!draft?.created && !!description;
   const currentJob = draft?.jobId
     ? jobs.find((j) => j.id === draft.jobId)
     : undefined;
@@ -872,7 +889,7 @@ function App() {
                   <Icon name={job.status === "delivered" ? "check" : "file"} />
                   <span>
                     <small>
-                      {job.filename} ·{" "}
+                      {job.archive?.filename || job.filename} ·{" "}
                       {destinations.find((d) => d.id === job.destination)
                         ?.name || job.destination}
                     </small>
@@ -1240,54 +1257,45 @@ function App() {
               <h2>Save</h2>
               <fieldset disabled={locked || busy}>
                 <label>
-                  Note
-                  <textarea
-                    aria-label="Note"
-                    rows={2}
-                    maxLength={2000}
-                    placeholder="Optional: project, event or purpose"
+                  Destination
+                  <select value={draft.destination} onChange={(e) => modify({ destination: e.target.value })}>
+                    {destinations.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+                  </select>
+                </label>
+                {usesPaperless ? (
+                  <label>
+                    Document type
+                    <select required value={draft.type} onChange={(e) => modify({ type: e.target.value })}>
+                      <option value="">Choose a type</option>
+                      {types.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                    </select>
+                  </label>
+                ) : (
+                  <label>
+                    Document date
+                    <input type="date" required value={draft.created || ""} onChange={(e) => modify({ created: e.target.value })} />
+                  </label>
+                )}
+                <label>
+                  Description{usesPaperless ? " (optional)" : ""}
+                  <input
+                    aria-label="Description"
+                    required={!usesPaperless}
+                    maxLength={128}
+                    placeholder={!usesPaperless || types.find((t) => String(t.id) === draft.type)?.name === "Receipt"
+                      ? "What did you buy? e.g. Extension cables"
+                      : types.find((t) => String(t.id) === draft.type)?.name === "Invoice"
+                        ? "What is this invoice for?"
+                        : "Brief description"}
                     value={draft.note}
                     onChange={(e) => modify({ note: e.target.value })}
                   />
                 </label>
-                <label>
-                  Document type
-                  <select
-                    value={draft.type}
-                    onChange={(e) => modify({ type: e.target.value })}
-                  >
-                    <option value="">Choose a type</option>
-                    {types.map((t) => (
-                      <option key={t.id} value={t.id}>
-                        {t.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Destination
-                  <select
-                    value={draft.destination}
-                    onChange={(e) => modify({ destination: e.target.value })}
-                  >
-                    {destinations.map((d) => (
-                      <option key={d.id} value={d.id}>
-                        {d.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                {!usesPaperless && <small className="export-filename">{generatedFilename}</small>}
                 <details className="export-options">
                   <summary>More options</summary>
-                  <label>
-                    PDF filename
-                    <input
-                      value={draft.filename}
-                      onChange={(e) => modify({ filename: e.target.value })}
-                    />
-                  </label>
                   {session.admin &&
-                    destinations.some((d) => d.kind === "paperless") && (
+                    usesPaperless && (
                       <div className="new-type">
                         <input
                           aria-label="New document type"
@@ -1313,46 +1321,6 @@ function App() {
                         </button>
                       </div>
                     )}
-                  {correspondents.length > 0 && (
-                    <label>
-                      Correspondent
-                      <select
-                        value={draft.correspondent}
-                        onChange={(e) =>
-                          modify({ correspondent: e.target.value })
-                        }
-                      >
-                        <option value="">Let Paperless choose</option>
-                        {correspondents.map((t) => (
-                          <option value={t.id} key={t.id}>
-                            {t.name}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  )}
-                  {tags.length > 0 && (
-                    <label>
-                      Tags
-                      <select
-                        multiple
-                        value={draft.tags.map(String)}
-                        onChange={(e) =>
-                          modify({
-                            tags: Array.from(e.target.selectedOptions, (o) =>
-                              Number(o.value),
-                            ),
-                          })
-                        }
-                      >
-                        {tags.map((t) => (
-                          <option value={t.id} key={t.id}>
-                            {t.name}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  )}
                   <label>
                     Page size
                     <select
@@ -1367,7 +1335,7 @@ function App() {
               </fieldset>
               <button
                 className="primary send"
-                disabled={!draft.pages.length || !online || busy || locked}
+                disabled={!draft.pages.length || !online || busy || locked || !saveDetailsValid}
                 onClick={() => void perform(send)}
               >
                 {draft.destination === "download"
@@ -1387,6 +1355,7 @@ function App() {
                       ? "Your PDF is ready"
                       : jobStatus(currentJob)}
                   </strong>
+                  {currentJob.archive && <small>{currentJob.archive.filename}</small>}
                   {currentJob.error && <p>{currentJob.error}</p>}
                   {currentJob.download && (
                     <a

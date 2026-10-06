@@ -52,7 +52,11 @@ def process(store, row, processing_slot=None):
             os.fsync(completed_pdf.fileno())
         os.replace(temporary_pdf, pdf)
         value.setdefault("timings", {})["pdf_seconds"] = round(time.monotonic()-started, 3)
-    filename = value["filename"][:-4] + "-" + row["id"] + ".pdf"
+    # Only archive submissions need an opaque reconciliation suffix. Direct
+    # exports use their requested name and refuse conflicting overwrites.
+    filename = value["filename"]
+    if destination["kind"] == "paperless" or "description" not in value["metadata"]:
+        filename = value["filename"][:-4] + "-" + row["id"] + ".pdf"
     if destination["kind"] == "download":
         value["download"] = f"/api/v1/jobs/{row['id']}/download"
         value.pop("credential", None)
@@ -77,6 +81,13 @@ def process(store, row, processing_slot=None):
             data = {k: str(v) for k, v in metadata.items() if v and k in ("document_type", "correspondent")}
             if metadata.get("tags"):
                 data["tags"] = [str(tag) for tag in metadata["tags"]]
+            if "description" in metadata:
+                fields = results(paperless(settings, token, "GET", "custom_fields/", params={"page_size": 1000}))
+                field = next((f for f in fields if f["name"] == "Description" and f["data_type"] == "string"), None)
+                if not field:
+                    raise ValueError("Ask an administrator to configure the Paperless Description field")
+                value["description_field"] = field["id"]
+                data["custom_fields"] = json.dumps({str(field["id"]): metadata["description"]})
             # Commit the uncertain state BEFORE sending to prevent blind POST replay.
             value["submission_started"] = True
             value["phase"] = "upload"
@@ -114,6 +125,16 @@ def process(store, row, processing_slot=None):
                 raise UncertainDelivery("Paperless completed without a document identifier")
             if value.get("ingestion_started_at"):
                 value.setdefault("timings", {})["paperless_seconds"] = round(time.time()-value["ingestion_started_at"], 3)
+        if "description" in value["metadata"]:
+            value["phase"] = "description"
+            update(store, row["id"], "waiting", value)
+            archived = paperless(settings, token, "GET", f"documents/{value['document_id']}/")
+            confirmed = next((f.get("value") for f in archived.get("custom_fields", []) if f["field"] == value["description_field"]), None)
+            if confirmed != value["metadata"]["description"]:
+                raise UncertainDelivery("Document ingested; Description needs review. No PDF will be resent.")
+            from .naming import export_filename
+            value["archive"] = {"title": archived["title"], "created": archived["created"],
+                                "filename": export_filename(archived["created"], archived["title"])}
         note = str(value["metadata"].get("note", value["metadata"].get("title", "")) or "").strip()
         if note:
             # Persist the document ID before adding a note: restart/retry must
