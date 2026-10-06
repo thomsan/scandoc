@@ -1,4 +1,5 @@
 import json
+from contextlib import nullcontext
 import multiprocessing
 import os
 import shutil
@@ -8,6 +9,7 @@ from pathlib import Path
 import httpx
 from ..scan import load_image, correct_image, write_pdf
 from .store import Store
+from .memory import release_image_memory
 from .delivery import paperless, results, deliver_folder, deliver_webdav, UncertainDelivery
 
 
@@ -16,7 +18,7 @@ def update(store, job_id, status, value):
         db.execute("UPDATE jobs SET status=?, value=? WHERE id=?", (status, json.dumps(value), job_id))
 
 
-def process(store, row):
+def process(store, row, processing_slot=None):
     settings = store.settings
     value = json.loads(row["value"])
     draft = store.draft(row["draft"], row["owner"])
@@ -38,7 +40,11 @@ def process(store, row):
             for page in draft["pages"]:
                 yield correct_image(load_image(directory / (page["id"] + ".png"), settings.max_pixels), page["corners"], page.get("rotation", 0), page.get("mode", "color"))
         temporary_pdf = pdf.with_suffix(".pending")
-        write_pdf(pages(), temporary_pdf, value["page_size"], max_bytes=settings.max_document_bytes)
+        with processing_slot if processing_slot is not None else nullcontext():
+            try:
+                write_pdf(pages(), temporary_pdf, value["page_size"], max_bytes=settings.max_document_bytes)
+            finally:
+                release_image_memory()
         with temporary_pdf.open("rb") as completed_pdf:
             os.fsync(completed_pdf.fileno())
         os.replace(temporary_pdf, pdf)
@@ -108,7 +114,7 @@ def process(store, row):
         db.execute("DELETE FROM drafts WHERE id=? AND owner=?", (draft["id"], row["owner"]))
 
 
-def run(settings, stop):
+def run(settings, stop, processing_slot=None):
     store = Store(settings)
     with store.connect() as db:
         db.execute("UPDATE jobs SET status='queued' WHERE status='processing'")
@@ -127,7 +133,7 @@ def run(settings, stop):
                 row = dict(row)
                 row["status"] = "uncertain"
             try:
-                process(store, row)
+                process(store, row, processing_slot)
             except Exception as exc:
                 # Read persisted state: it may contain a task ID acquired in this attempt.
                 value = store.job(row["id"], row["owner"])
@@ -149,9 +155,9 @@ def run(settings, stop):
         stop.wait(1)
 
 
-def start(settings):
+def start(settings, processing_slot=None):
     context = multiprocessing.get_context("spawn")
     stop = context.Event()
-    process = context.Process(target=run, args=(settings, stop), daemon=True)
+    process = context.Process(target=run, args=(settings, stop, processing_slot), daemon=True)
     process.start()
     return process, stop
