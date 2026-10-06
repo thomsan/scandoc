@@ -1,5 +1,6 @@
 import argparse
 import os
+import sys
 
 from .scan import multi_scan, multi_scan2pdf, scan, scan2pdf
 
@@ -18,6 +19,10 @@ def main_cli():
     python -m src.scandoc.main_cli --images <img_dir> --pdf --output <output_file> --interactive
     python -m src.scandoc.main_cli --image <img_file> --pdf --output <output_file> --interactive
     """
+    if len(sys.argv) > 1 and sys.argv[1] == "serve":
+        from .web.app import serve
+        serve(sys.argv[2:])
+        return
     ap = argparse.ArgumentParser()
     group = ap.add_mutually_exclusive_group(required=True)
     group.add_argument("--images", help="Directory of images to be scanned")
@@ -55,8 +60,7 @@ def main_cli():
                 output_path = os.path.join(img_dir, "output.pdf")
             multi_scan2pdf(img_dir, output_path=output_path, interactive_mode=interactive_mode)
         else:
-            if output_path is None:
-                output_dir = os.path.join(img_dir, "output")
+            output_dir = output_path or os.path.join(img_dir, "output")
             multi_scan(img_dir, output_dir=output_dir, interactive_mode=interactive_mode)
 
 

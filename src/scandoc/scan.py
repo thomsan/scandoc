@@ -1,140 +1,133 @@
-import os
-import sys
+"""Document geometry shared by the CLI, desktop editor and web service."""
+from pathlib import Path
 
 import cv2
-import imutils
 import numpy as np
-from imutils import perspective
-from PIL import Image
+from PIL import Image, ImageOps
+from reportlab.pdfgen import canvas
+from reportlab.lib.utils import ImageReader
 
-from .interactive_get_contour import interactive_get_contour
+valid_formats = [".jpg", ".jpeg", ".jp2", ".png", ".bmp", ".webp", ".tiff", ".tif"]
 
-APPROX_POLY_DP_ACCURACY_RATIO = 0.02
-IMG_RESIZE_H = 500.0
 
-valid_formats = [".jpg", ".jpeg", ".jp2", ".png", ".bmp", ".tiff", ".tif"]
+def load_image(source, max_pixels=24_000_000):
+    try:
+        with Image.open(source) as image:
+            if image.width * image.height > max_pixels:
+                raise ValueError("Image exceeds the pixel limit")
+            return ImageOps.exif_transpose(image).convert("RGB")
+    except (OSError, Image.DecompressionBombError) as exc:
+        raise ValueError("Invalid or unsupported image") from exc
+
+
+def detect_corners(image):
+    array = np.asarray(image)
+    height, width = array.shape[:2]
+    scale = min(1.0, 1000 / max(width, height))
+    small = cv2.resize(array, (max(2, round(width * scale)), max(2, round(height * scale))))
+    gray = cv2.GaussianBlur(cv2.cvtColor(small, cv2.COLOR_RGB2GRAY), (5, 5), 0)
+    masks = [cv2.Canny(gray, 50, 150), cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]]
+    candidates = []
+    for mask in masks:
+        contours, _ = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        for contour in sorted(contours, key=cv2.contourArea, reverse=True)[:20]:
+            polygon = cv2.approxPolyDP(contour, .02 * cv2.arcLength(contour, True), True)
+            area = cv2.contourArea(polygon)
+            if len(polygon) == 4 and cv2.isContourConvex(polygon) and area > small.shape[0] * small.shape[1] * .08:
+                points = polygon.reshape(4, 2)
+                border = np.any((points[:, 0] <= 2) | (points[:, 1] <= 2) | (points[:, 0] >= small.shape[1]-3) | (points[:, 1] >= small.shape[0]-3))
+                candidates.append((area * (.4 if border else 1), points))
+    if not candidates:
+        return [[0, 0], [width-1, 0], [width-1, height-1], [0, height-1]]
+    points = max(candidates, key=lambda item: item[0])[1].astype(float) / scale
+    points[:, 0] = np.clip(points[:, 0], 0, width-1)
+    points[:, 1] = np.clip(points[:, 1], 0, height-1)
+    center = points.mean(axis=0)
+    points = points[np.argsort(np.arctan2(points[:, 1]-center[1], points[:, 0]-center[0]))]
+    points = np.roll(points, -np.argmin(points.sum(axis=1)), axis=0)
+    return points.tolist()
+
+
+def validate_corners(corners, width, height):
+    points = np.asarray(corners, dtype=np.float32)
+    if points.shape != (4, 2) or not np.isfinite(points).all():
+        raise ValueError("Supply four finite corners in top-left, top-right, bottom-right, bottom-left order")
+    if np.any(points < 0) or np.any(points[:, 0] > width-1) or np.any(points[:, 1] > height-1):
+        raise ValueError("Corners must be inside the image")
+    if not cv2.isContourConvex(points.reshape(4, 1, 2)) or cv2.contourArea(points, oriented=True) < 16:
+        raise ValueError("Corners must form a non-intersecting quadrilateral")
+    return points
+
+
+def correct_image(image, corners=None, rotation=0, mode="color"):
+    if rotation not in (0, 90, 180, 270) or mode not in ("color", "grayscale", "document"):
+        raise ValueError("Invalid rotation or cleanup mode")
+    points = validate_corners(corners if corners is not None else detect_corners(image), *image.size)
+    tl, tr, br, bl = points
+    width = max(2, round(max(np.linalg.norm(tr-tl), np.linalg.norm(br-bl))))
+    height = max(2, round(max(np.linalg.norm(bl-tl), np.linalg.norm(br-tr))))
+    matrix = cv2.getPerspectiveTransform(points, np.float32([[0, 0], [width-1, 0], [width-1, height-1], [0, height-1]]))
+    result = cv2.warpPerspective(np.asarray(image), matrix, (width, height))
+    if mode != "color":
+        result = cv2.cvtColor(result, cv2.COLOR_RGB2GRAY)
+        if mode == "document":
+            result = cv2.adaptiveThreshold(result, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 12)
+    return Image.fromarray(result).rotate(-rotation, expand=True)
+
+
+def write_pdf(images, output_path, page_size="natural"):
+    if page_size not in ("natural", "a4"):
+        raise ValueError("Unknown PDF page size")
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    pdf = canvas.Canvas(str(output_path), invariant=1)
+    count = 0
+    for image in images:
+        width, height = image.size
+        if page_size == "a4":
+            pw, ph = (595.28, 841.89) if width <= height else (841.89, 595.28)
+            scale = min((pw-36)/width, (ph-36)/height)
+            dw, dh = width*scale, height*scale
+        else:
+            pw, ph = width * 72/300, height * 72/300
+            dw, dh = pw, ph
+        pdf.setPageSize((pw, ph))
+        pdf.drawImage(ImageReader(image), (pw-dw)/2, (ph-dh)/2, dw, dh)
+        pdf.showPage()
+        count += 1
+    if not count:
+        raise ValueError("No images to export")
+    pdf.save()
 
 
 def scan(img_path: str, output_path: str | None = None, interactive_mode: bool = False):
-    """
-    Scan a single image and return the scanned image as a numpy array.
-    :param img_path: Path to the image to be scanned
-    :param output_path: Path to save the scanned image
-    :param interactive_mode: Flag for manually verifying and/or setting document corners
-    :return: Scanned image as a numpy array
-    """
-
-    if os.path.splitext(img_path)[1].lower() not in valid_formats:
-        print(f"Invalid file format. Valid formats are: {valid_formats}")
-        sys.exit(1)
-
-    use_otsu = True
-    ksize = 7
-    threshold = 130
-
-    img = cv2.imread(img_path)
-    assert img is not None
-    orig = img.copy()
-    ratio = img.shape[0] / IMG_RESIZE_H
-    img = imutils.resize(img, height=int(IMG_RESIZE_H))
-
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    img = cv2.GaussianBlur(img, (ksize, ksize), 0)
-    # thresholding
-    threshold_type = cv2.THRESH_BINARY + cv2.THRESH_OTSU if use_otsu else cv2.THRESH_BINARY
-    _, img = cv2.threshold(
-        img,
-        threshold,
-        255,
-        threshold_type,
-    )
-    # find contours
-    cnts, _ = cv2.findContours(img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    # Sort contours by area and keep the largest one
-    cnts = sorted(cnts, key=cv2.contourArea, reverse=True)[:5]
-
-    for c in cnts:
-        # Approximate the contour to a polygon
-        perimeter = cv2.arcLength(c, True)
-        polygon = cv2.approxPolyDP(c, APPROX_POLY_DP_ACCURACY_RATIO * perimeter, True)
-        # If the polygon has 4 vertices, we've likely found the paper
-        if len(polygon) == 4:
-            outline = polygon.reshape(4, 2)
-
-    if outline is None:
-        h, w = img.shape
-        outline = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]])
-
-    if interactive_mode and outline.any():
-        tmp_img = cv2.cvtColor(orig, cv2.COLOR_BGR2RGB)
-        outline = interactive_get_contour(outline, imutils.resize(tmp_img, height=int(IMG_RESIZE_H)))
-
-    result = perspective.four_point_transform(orig, outline * ratio)
-
+    image = load_image(img_path)
+    corners = detect_corners(image)
+    if interactive_mode:
+        from .interactive_get_contour import interactive_get_contour
+        corners = interactive_get_contour(np.asarray(corners), np.asarray(image)).tolist()
+    result = correct_image(image, corners)
     if output_path:
-        if not os.path.exists(os.path.dirname(output_path)):
-            os.makedirs(os.path.dirname(output_path))
-        cv2.imwrite(output_path, result)
-
-    return cv2.cvtColor(result, cv2.COLOR_BGR2RGB)
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        result.save(output_path)
+    return np.asarray(result)
 
 
 def multi_scan(img_dir: str, output_dir: str | None = None, interactive_mode: bool = False) -> list:
-    """
-    Scan multiple images and return the scanned images as a list of PIL Images.
-    :param img_dir: Directory of images to be scanned
-    :param output_dir: Directory to save the scanned images
-    :param interactive_mode: Flag for manually verifying and/or setting document corners
-    :return: List of PIL Images
-    """
-
-    img_files = [f for f in os.listdir(img_dir) if os.path.splitext(f)[1].lower() in valid_formats]
-    img_files.sort()
+    files = sorted(p for p in Path(img_dir).iterdir() if p.suffix.lower() in valid_formats)
+    if not files:
+        raise ValueError("No supported images found")
     images = []
-    for img_f in img_files:
-        if output_dir:
-            scan(
-                img_path=os.path.join(img_dir, img_f),
-                output_path=os.path.join(output_dir, img_f),
-                interactive_mode=interactive_mode,
-            )
-        else:
-            output_img = scan(img_path=os.path.join(img_dir, img_f), interactive_mode=interactive_mode)
-            images.append(Image.fromarray(output_img))
-    if not output_dir:
-        return images
+    for path in files:
+        result = scan(str(path), str(Path(output_dir)/path.name) if output_dir else None, interactive_mode)
+        if not output_dir:
+            images.append(Image.fromarray(result))
+    return images
 
 
 def scan2pdf(img_path: str, output_path: str, interactive_mode: bool = False):
-    """
-    Scan a single image and save the scanned image as a PDF.
-    :param img_path: Path to the image to be scanned
-    :param output_path: Path to save the scanned PDF
-    :param interactive_mode: Flag for manually verifying and/or setting document corners
-    """
-
-    image = Image.fromarray(scan(img_path=img_path, interactive_mode=interactive_mode))
-    if not os.path.exists(os.path.dirname(output_path)):
-        os.makedirs(os.path.dirname(output_path))
-    image.save(output_path, "PDF", resolution=100.0)
+    write_pdf([Image.fromarray(scan(img_path, interactive_mode=interactive_mode))], output_path)
 
 
 def multi_scan2pdf(img_dir: str, output_path: str, interactive_mode: bool = False):
-    """
-    Scan multiple images and save the scanned images as a PDF.
-    :param img_dir: Directory of images to be scanned
-    :param output_path: Path to save the scanned PDF
-    :param interactive_mode: Flag for manually verifying and/or setting document corners
-    """
-
-    images = multi_scan(img_dir=img_dir, interactive_mode=interactive_mode)
-    # scale images to same size
-    widths, heights = zip(*(i.size for i in images))
-    min_width = min(widths)
-    min_height = min(heights)
-    images = [i.resize((min_width, min_height)) for i in images]
-    # make sure the directory exists
-    output_dir = os.path.dirname(output_path)
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-    images[0].save(output_path, "PDF", resolution=100.0, save_all=True, append_images=images[1:])
+    files = sorted(p for p in Path(img_dir).iterdir() if p.suffix.lower() in valid_formats)
+    write_pdf((Image.fromarray(scan(str(p), interactive_mode=interactive_mode)) for p in files), output_path)

@@ -1,0 +1,1 @@
+"""Optional Scandoc web application."""

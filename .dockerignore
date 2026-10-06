@@ -1,0 +1,11 @@
+.git
+.venv
+.scandoc-venv
+frontend/node_modules
+frontend/test-results
+frontend/playwright-report
+src/scandoc/web/static
+sample_images
+dist
+*.egg-info
+__pycache__

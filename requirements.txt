@@ -1,6 +1,4 @@
-imutils==0.5.4
-matplotlib==3.10.8
 numpy==2.3.5
-opencv-python==4.13.0.92
+opencv-python-headless==4.13.0.92
 pillow==12.3.0
-scipy==1.17.1
+reportlab==4.5.1

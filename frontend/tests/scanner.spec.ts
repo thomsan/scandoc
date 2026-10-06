@@ -1,0 +1,156 @@
+import { test, expect } from "@playwright/test";
+import { resolve } from "node:path";
+
+test("capture, adjust corners, reorder, preview and download without losing the draft", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "New document", exact: true }).click();
+  await page
+    .locator("input[type=file]")
+    .first()
+    .setInputFiles([
+      resolve("../tests/fixtures/receipt.png"),
+      resolve("../tests/fixtures/landscape.png"),
+    ]);
+  await expect(page.getByRole("button", { name: /^Page 2/ })).toBeVisible();
+  await page.getByRole("slider", { name: "Corner 1", exact: true }).focus();
+  await page.keyboard.press("ArrowRight");
+  await page
+    .getByRole("button", { name: "Move page 2 up", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Preview", exact: true }).click();
+  await expect(page.getByAltText("Corrected document preview")).toBeVisible();
+  await page
+    .getByLabel("Title", { exact: true })
+    .fill(`Office supplies ${test.info().project.name}`);
+  await page.getByRole("button", { name: "Create PDF", exact: true }).click();
+  await expect(page.getByRole("link", { name: "Download PDF" })).toBeVisible({
+    timeout: 20000,
+  });
+  const download = page.waitForEvent("download");
+  await page.getByRole("link", { name: "Download PDF" }).click();
+  expect((await download).suggestedFilename()).toBe("document.pdf");
+  await page
+    .getByRole("button", { name: "← All documents", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", {
+      name: `Office supplies ${test.info().project.name}`,
+      exact: true,
+    }),
+  ).toBeVisible();
+  await page.screenshot({
+    path: `test-results/${test.info().project.name}-workspace.png`,
+    fullPage: true,
+  });
+});
+
+test("installed shell and edited draft survive offline reload", async ({
+  page,
+  context,
+}) => {
+  await page.goto("/");
+  await page.evaluate(() => navigator.serviceWorker.ready);
+  await page.getByRole("button", { name: "New document", exact: true }).click();
+  await page
+    .locator("input[type=file]")
+    .first()
+    .setInputFiles(resolve("../tests/fixtures/receipt.png"));
+  await page
+    .getByLabel("Title", { exact: true })
+    .fill(`Offline receipt ${test.info().project.name}`);
+  await page.waitForTimeout(1800);
+  await context.setOffline(true);
+  await page.getByRole("slider", { name: "Corner 1", exact: true }).focus();
+  await page.keyboard.press("ArrowRight");
+  await page.reload();
+  await page
+    .locator("article")
+    .filter({
+      has: page.getByRole("heading", {
+        name: `Offline receipt ${test.info().project.name}`,
+        exact: true,
+      }),
+    })
+    .getByRole("button", { name: "Continue", exact: false })
+    .click();
+  await expect(page.getByLabel("Title", { exact: true })).toHaveValue(
+    `Offline receipt ${test.info().project.name}`,
+  );
+  await expect(
+    page.getByRole("button", { name: "Create PDF", exact: true }),
+  ).toBeDisabled();
+  await context.setOffline(false);
+  await expect(
+    page.getByRole("button", { name: "Create PDF", exact: true }),
+  ).toBeEnabled();
+});
+
+test("administrator can configure a destination without showing its secret", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page
+    .getByRole("button", { name: "Destination settings", exact: true })
+    .click();
+  await page.getByLabel("Identifier", { exact: true }).fill("local-export");
+  await page.getByLabel("Display name", { exact: true }).fill("Local export");
+  await page
+    .getByLabel("Absolute folder path", { exact: true })
+    .fill("/tmp/scandoc-browser-output");
+  await page
+    .getByRole("button", { name: "Save destination", exact: true })
+    .click();
+  await expect(
+    page.getByText("Destination saved", { exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Close settings", exact: true })
+    .click();
+  await page.getByRole("button", { name: "New document", exact: true }).click();
+  await expect(
+    page.getByRole("combobox", { name: "Destination", exact: true }),
+  ).toContainText("Local export");
+});
+
+test("pointer corners align with an undistorted original and show a magnified view", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "New document", exact: true }).click();
+  await page
+    .locator("input[type=file]")
+    .first()
+    .setInputFiles(resolve("../tests/fixtures/receipt.png"));
+  await expect(
+    page.getByRole("button", { name: "Preview", exact: true }),
+  ).toBeEnabled();
+  const geometry = await page.locator(".corner-editor").evaluate((element) => {
+    const svg = element.querySelector("svg")!;
+    const image = element.querySelector("img")!;
+    return {
+      scale: svg.getScreenCTM()!.a,
+      ratio: image.clientWidth / image.clientHeight,
+      original: svg.viewBox.baseVal.width / svg.viewBox.baseVal.height,
+    };
+  });
+  expect(geometry.ratio).toBeCloseTo(geometry.original, 2);
+  const corner = page.getByRole("slider", { name: "Corner 1", exact: true });
+  const before = (await corner.getAttribute("aria-valuetext"))!
+    .split(",")
+    .map(Number);
+  const bounds = (await corner.boundingBox())!;
+  const x = bounds.x + bounds.width / 2,
+    y = bounds.y + bounds.height / 2;
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await expect(page.locator(".magnifier")).toBeVisible();
+  await page.mouse.move(x + 20, y + 15, { steps: 5 });
+  await page.mouse.up();
+  const after = (await corner.getAttribute("aria-valuetext"))!
+    .split(",")
+    .map(Number);
+  expect(Math.abs(after[0] - before[0] - 20 / geometry.scale)).toBeLessThan(2);
+  expect(Math.abs(after[1] - before[1] - 15 / geometry.scale)).toBeLessThan(2);
+});

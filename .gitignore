@@ -161,3 +161,8 @@ cython_debug/
 #.idea/
 
 output*
+
+frontend/node_modules/
+frontend/test-results/
+frontend/playwright-report/
+src/scandoc/web/static/

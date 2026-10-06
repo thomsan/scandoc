@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scandoc"
-version = "0.1.1"
+version = "0.2.0"
 authors = [
   { name="Thomas Ascioglu", email="thomasascioglu@gmail.com" },
 ]
@@ -16,19 +16,25 @@ readme = "README.md"
 keywords = ["doc", "paper", "document", "scanner", "scan", "image", "crop", "detect"]
 license = "MIT"
 license-files = ["LICENSE"]
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "imutils==0.5.4",
-    "matplotlib==3.10.8",
     "numpy==2.3.5",
-    "opencv-python==4.13.0.92",
+    "opencv-python-headless==4.13.0.92",
     "pillow==12.3.0",
-    "scipy==1.17.1",
+    "reportlab>=4.4,<5",
 ]
+
+[project.optional-dependencies]
+desktop = ["matplotlib==3.10.8"]
+web = ["fastapi>=0.115,<1", "uvicorn>=0.34,<1", "python-multipart>=0.0.20", "httpx>=0.28,<1", "cryptography>=44", "pydantic-settings>=2.8,<3"]
+test = ["pytest>=8,<10", "httpx>=0.28,<1", "pypdf>=5,<7"]
+
+[tool.setuptools.package-data]
+scandoc = ["web/static/**/*", "web/static/*"]
 
 [project.scripts]
 scandoc = "scandoc.main_cli:main_cli"
