@@ -31,9 +31,27 @@ type Job = {
   error?: string;
 };
 let csrf = "";
+let authRevision = 0;
+let sessionQueue: Promise<unknown> = Promise.resolve();
+function sessionAction<T>(action: () => Promise<T>): Promise<T> {
+  const pending = sessionQueue.catch(() => {}).then(action);
+  sessionQueue = pending;
+  return pending;
+}
+function revokeSession() {
+  return sessionAction(async () => {
+    if (!localStorage.getItem("scandoc-signed-out")) return;
+    const previous = await api("/session");
+    await api("/session", {
+      method: "DELETE",
+      headers: { "X-CSRF-Token": previous.csrf },
+    });
+  });
+}
 async function api(path: string, options: RequestInit = {}) {
   const headers = new Headers(options.headers);
-  headers.set("X-CSRF-Token", csrf);
+  if (!headers.has("X-CSRF-Token")) headers.set("X-CSRF-Token", csrf);
+  const revision = authRevision;
   if (options.body && !(options.body instanceof FormData))
     headers.set("Content-Type", "application/json");
   const response = await fetch("/api/v1" + path, {
@@ -42,7 +60,7 @@ async function api(path: string, options: RequestInit = {}) {
     credentials: "same-origin",
   });
   if (!response.ok) {
-    if (response.status === 401)
+    if (response.status === 401 && revision === authRevision)
       window.dispatchEvent(new Event("scandoc-session-expired"));
     let message = "Request failed";
     try {
@@ -122,15 +140,32 @@ function App() {
   useEffect(() => {
     latest.current = draft;
   }, [draft]);
+  function hideAccount() {
+    authRevision++;
+    csrf = "";
+    latest.current = null;
+    localStorage.removeItem("scandoc-owner");
+    setSession(null);
+    setDraft(null);
+    setList([]);
+    setJobs([]);
+    setSettings(false);
+  }
   async function refresh(current: Session) {
+    const revision = authRevision;
+    const active = () =>
+      revision === authRevision && !localStorage.getItem("scandoc-signed-out");
     const cached = await db.account(current.owner);
+    if (!active()) return;
     if (cached) {
       setTypes(cached.types || []);
       setTags(cached.tags || []);
       setCorrespondents(cached.correspondents || []);
       setDestinations(cached.destinations || destinations);
     }
-    setList(await db.drafts(current.owner));
+    const local = await db.drafts(current.owner);
+    if (!active()) return;
+    setList(local);
     if (!navigator.onLine) return;
     try {
       const [t, d, m, j, remote] = await Promise.all([
@@ -140,6 +175,7 @@ function App() {
         api("/jobs"),
         api("/drafts"),
       ]);
+      if (!active()) return;
       setTypes(t);
       setDestinations(d);
       setTags(m.tags);
@@ -172,7 +208,9 @@ function App() {
           });
         }
       }
-      setList(await db.drafts(current.owner));
+      const restored = await db.drafts(current.owner);
+      if (!active()) return;
+      setList(restored);
       await db.account(current.owner, {
         username: current.username,
         types: t,
@@ -181,22 +219,44 @@ function App() {
         correspondents: m.correspondents,
       });
     } catch (e) {
-      setError((e as Error).message);
+      if (active()) setError((e as Error).message);
     }
   }
   async function load() {
+    const revision = authRevision;
     try {
+      if (localStorage.getItem("scandoc-signed-out")) {
+        // Serialize revocation with sign-in so a late DELETE cannot clear a new cookie.
+        setOnline(navigator.onLine);
+        await revokeSession().catch(() => {});
+        return;
+      }
       const current = await api("/session");
+      if (
+        revision !== authRevision ||
+        localStorage.getItem("scandoc-signed-out")
+      )
+        return;
       csrf = current.csrf;
       setOnline(true);
       setSession(current);
       localStorage.setItem("scandoc-owner", current.owner);
       await refresh(current);
     } catch (e) {
+      if (
+        revision !== authRevision ||
+        localStorage.getItem("scandoc-signed-out")
+      )
+        return;
       if (!navigator.onLine || e instanceof TypeError) {
         setOnline(false);
         const owner = localStorage.getItem("scandoc-owner");
         const cached = owner && (await db.account(owner));
+        if (
+          revision !== authRevision ||
+          localStorage.getItem("scandoc-signed-out")
+        )
+          return;
         if (cached) {
           const current = {
             owner: owner!,
@@ -214,13 +274,11 @@ function App() {
   }
   useEffect(() => {
     void load();
-    const expired = () => {
-      csrf = "";
-      setSession(null);
-      setDraft(null);
-      setList([]);
-      localStorage.removeItem("scandoc-owner");
+    const expired = () => hideAccount();
+    const storageChanged = (event: StorageEvent) => {
+      if (event.key === "scandoc-signed-out" && event.newValue) hideAccount();
     };
+    window.addEventListener("storage", storageChanged);
     window.addEventListener("scandoc-session-expired", expired);
     const up = () => {
         setOnline(true);
@@ -233,6 +291,7 @@ function App() {
       void navigator.serviceWorker.register("/sw.js");
     return () => {
       window.removeEventListener("scandoc-session-expired", expired);
+      window.removeEventListener("storage", storageChanged);
       window.removeEventListener("online", up);
       window.removeEventListener("offline", down);
     };
@@ -266,9 +325,11 @@ function App() {
   );
   useEffect(() => {
     if (!session || !online) return;
+    const revision = authRevision;
     const timer = setInterval(() => {
       void api("/jobs")
         .then(async (entries: Job[]) => {
+          if (revision !== authRevision) return;
           setJobs(entries);
           for (const job of entries.filter((j) => j.status === "delivered")) {
             const local = (await db.drafts(session.owner)).find(
@@ -279,7 +340,8 @@ function App() {
               if (latest.current?.id === local.id) setDraft(null);
             }
           }
-          setList(await db.drafts(session.owner));
+          const local = await db.drafts(session.owner);
+          if (revision === authRevision) setList(local);
         })
         .catch(() => {});
     }, 1500);
@@ -581,7 +643,9 @@ function App() {
   }
   function modify(patch: Partial<Draft>) {
     if (latest.current)
-      void persist({ ...latest.current, ...patch }).catch((e) => setError(e.message));
+      void persist({ ...latest.current, ...patch }).catch((e) =>
+        setError(e.message),
+      );
   }
   async function discard(item: Draft) {
     if (!window.confirm("Delete this draft and its images?")) return;
@@ -623,9 +687,14 @@ function App() {
             event.preventDefault();
             const data = new FormData(event.currentTarget);
             void perform(async () => {
-              const current = await api("/session", {
-                method: "POST",
-                body: json(Object.fromEntries(data)),
+              authRevision++;
+              const current = await sessionAction(async () => {
+                const result = await api("/session", {
+                  method: "POST",
+                  body: json(Object.fromEntries(data)),
+                });
+                localStorage.removeItem("scandoc-signed-out");
+                return result;
               });
               csrf = current.csrf;
               setOnline(true);
@@ -686,20 +755,19 @@ function App() {
             </button>
           )}
           <button
+            disabled={session.owner === "local"}
             onClick={() =>
               void perform(async () => {
+                localStorage.setItem("scandoc-signed-out", "1");
+                hideAccount();
                 if (session.owner !== "local")
-                  await api("/session", { method: "DELETE" });
-                localStorage.removeItem("scandoc-owner");
-                csrf = "";
-                setSession(null);
-                setDraft(null);
-                setList([]);
-                setJobs([]);
+                  await revokeSession().catch(() => {});
               })
             }
           >
-            {session.username} · Sign out
+            {session.owner === "local"
+              ? session.username
+              : `${session.username} · Sign out`}
           </button>
         </nav>
       </header>

@@ -158,9 +158,11 @@ test("logout hides retained drafts; another account cannot read them; same accou
   const drafts = await (await page.request.get("/api/v1/drafts")).json();
   const draft = drafts.find((d: any) => d.title === name);
   expect(draft).toBeTruthy();
-  await page.getByRole("button", { name: /Sign out/ }).click();
   await page.evaluate(() => navigator.serviceWorker.ready);
+  // A disconnected logout must hide drafts before the server cookie is revoked.
   await context.setOffline(true);
+  await page.getByRole("button", { name: /Sign out/ }).click();
+  await expect(page.getByLabel("Username", { exact: true })).toBeVisible();
   await page.reload();
   await expect(page.getByLabel("Username", { exact: true })).toBeVisible();
   await context.setOffline(false);
