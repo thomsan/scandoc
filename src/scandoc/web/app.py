@@ -1,4 +1,4 @@
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import io
 import json
+import multiprocessing
 import re
 import secrets
 import shutil
@@ -61,12 +62,13 @@ def create_app(settings=None):
     settings.prepare()
     store = Store(settings)
     worker = None
+    processing_slot = multiprocessing.get_context("spawn").BoundedSemaphore(1)
 
     @asynccontextmanager
     async def lifespan(app):
         nonlocal worker
         if settings.worker_enabled:
-            worker = start(settings)
+            worker = start(settings, processing_slot)
         yield
         if worker:
             worker[1].set()
@@ -152,6 +154,19 @@ def create_app(settings=None):
     @app.exception_handler(httpx.HTTPError)
     async def upstream_error(request, exc):
         return JSONResponse({"detail": "Paperless or storage is unavailable or rejected the request"}, 502)
+
+    @contextmanager
+    def image_processing():
+        # Share the memory budget with the durable worker, keeping status requests free.
+        while not processing_slot.acquire(timeout=1):
+            if worker and not worker[0].is_alive():
+                raise HTTPException(503, "Processing worker stopped; restart the service to resume")
+        try:
+            yield
+        finally:
+            from .memory import release_image_memory
+            release_image_memory()
+            processing_slot.release()
 
     @app.get("/health")
     def health():
@@ -242,15 +257,24 @@ def create_app(settings=None):
             return old
         if len(draft["pages"]) >= settings.max_pages:
             raise HTTPException(413, "Document page limit reached")
-        raw = file.file.read(settings.max_image_bytes+1)
-        if len(raw) > settings.max_image_bytes or sum(p["bytes"] for p in draft["pages"]) + len(raw) > settings.max_document_bytes:
-            raise HTTPException(413, "Image or document byte limit exceeded")
-        image = load_image(io.BytesIO(raw), settings.max_pixels, allowed_formats={"JPEG", "PNG", "WEBP", "TIFF"})
-        page = {"id": page_id, "width": image.width, "height": image.height, "corners": detect_corners(image), "rotation": 0, "mode": "color", "bytes": len(raw)}
-        path = settings.data_dir / "drafts" / draft["id"] / (page_id + ".png")
-        image.save(path)
-        draft["pages"].append(page)
-        store.save_draft(draft, current["owner"])
+        with image_processing():
+            # Leave waiting uploads in their spooled files, rather than retaining
+            # one maximum-size byte buffer for every concurrent request.
+            draft = draft_for(draft_id, current, True)
+            old = next((p for p in draft["pages"] if p["id"] == page_id), None)
+            if old:
+                return old
+            if len(draft["pages"]) >= settings.max_pages:
+                raise HTTPException(413, "Document page limit reached")
+            raw = file.file.read(settings.max_image_bytes+1)
+            if len(raw) > settings.max_image_bytes or sum(p["bytes"] for p in draft["pages"]) + len(raw) > settings.max_document_bytes:
+                raise HTTPException(413, "Image or document byte limit exceeded")
+            with load_image(io.BytesIO(raw), settings.max_pixels, allowed_formats={"JPEG", "PNG", "WEBP", "TIFF"}) as image:
+                page = {"id": page_id, "width": image.width, "height": image.height, "corners": detect_corners(image), "rotation": 0, "mode": "color", "bytes": len(raw)}
+                path = settings.data_dir / "drafts" / draft["id"] / (page_id + ".png")
+                image.save(path)
+            draft["pages"].append(page)
+            store.save_draft(draft, current["owner"])
         return page
 
     @app.get("/api/v1/drafts/{draft_id}/pages/{page_id}/source")
@@ -273,17 +297,19 @@ def create_app(settings=None):
     def detect(draft_id: str, page_id: str, current=Depends(user)):
         draft = draft_for(draft_id, current, True)
         page, path = page_for(draft, page_id)
-        page["corners"] = detect_corners(load_image(path, settings.max_pixels))
+        with image_processing(), load_image(path, settings.max_pixels) as image:
+            page["corners"] = detect_corners(image)
         store.save_draft(draft, current["owner"])
         return page
 
     @app.post("/api/v1/drafts/{draft_id}/pages/{page_id}/preview")
     def preview(draft_id: str, page_id: str, body: PageEdit, current=Depends(user)):
         page, path = page_for(draft_for(draft_id, current), page_id)
-        image = correct_image(load_image(path, settings.max_pixels), body.corners, body.rotation, body.mode)
-        image.thumbnail((1600, 1600))
-        buffer = io.BytesIO()
-        image.save(buffer, "JPEG", quality=88)
+        with image_processing(), load_image(path, settings.max_pixels) as original:
+            with correct_image(original, body.corners, body.rotation, body.mode) as image:
+                image.thumbnail((1600, 1600))
+                buffer = io.BytesIO()
+                image.save(buffer, "JPEG", quality=88)
         return Response(buffer.getvalue(), media_type="image/jpeg")
 
     @app.put("/api/v1/drafts/{draft_id}/order")

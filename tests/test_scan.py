@@ -97,3 +97,14 @@ def test_pdf_embedded_images_quality_order_and_byte_limit(tmp_path):
     with pytest.raises(ValueError,match='document byte limit'):
         write_pdf([color],tmp_path/'too-large.pdf',max_bytes=100)
     assert not (tmp_path/'too-large.pdf').exists()
+
+
+def test_failed_pdf_export_preserves_existing_output(tmp_path):
+    output=tmp_path/'existing.pdf';output.write_bytes(b'previous document')
+    def interrupted():
+        yield Image.new('RGB',(100,150),'white')
+        raise ValueError('Interrupted source')
+    for pages in (iter([]),interrupted()):
+        with pytest.raises(ValueError):write_pdf(pages,output)
+        assert output.read_bytes()==b'previous document'
+    assert not list(tmp_path.glob('*.tmp'))

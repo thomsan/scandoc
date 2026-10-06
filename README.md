@@ -117,4 +117,4 @@ Code is based on:
 - [endalk200
   /document-scanner](https://github.com/endalk200/document-scanner/tree/main)
 
-PDF pages are written sequentially to disk to bound memory. Color pages use JPEG quality 95 at the full corrected resolution; grayscale and document-cleanup pages use lossless compression. Hosted PDFs also respect the configured document byte limit.
+PDF pages are written sequentially to disk to bound memory. The API and worker share one image-processing slot; waiting uploads remain in spooled files. Destination transfers and verification use bounded streams. Color pages use JPEG quality 95 at the full corrected resolution; grayscale and document-cleanup pages use lossless compression. Hosted PDFs also respect the configured document byte limit. A failed PDF export preserves any existing output file.

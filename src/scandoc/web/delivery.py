@@ -43,6 +43,22 @@ def validate_destination(destination):
             raise ValueError("WebDAV requires an HTTPS collection URL without embedded credentials")
 
 
+def file_digest(path):
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").digest()
+
+
+def remote_digest(connection, url):
+    with connection.stream("GET", url) as response:
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        digest = hashlib.sha256()
+        for chunk in response.iter_bytes(1024 * 1024):
+            digest.update(chunk)
+        return digest.digest()
+
+
 def deliver_folder(destination, pdf, filename):
     root = Path(destination["root"]).resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -50,9 +66,9 @@ def deliver_folder(destination, pdf, filename):
     # Unique staging files let a retry recover even after a process died mid-write.
     import uuid
     temporary = root / ("." + filename + "." + str(uuid.uuid4()) + ".part")
-    digest = hashlib.sha256(pdf.read_bytes()).digest()
+    digest = file_digest(pdf)
     if target.exists():
-        if target.is_symlink() or hashlib.sha256(target.read_bytes()).digest() != digest:
+        if target.is_symlink() or file_digest(target) != digest:
             raise ValueError("Destination already contains a different file")
         return str(target)
     try:
@@ -63,6 +79,12 @@ def deliver_folder(destination, pdf, filename):
             os.fsync(output.fileno())
         # A hard link publishes the complete file atomically without overwriting.
         os.link(temporary, target)
+        if os.name == "posix":
+            directory = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
     finally:
         temporary.unlink(missing_ok=True)
     return str(target)
@@ -72,20 +94,18 @@ def deliver_webdav(settings, destination, pdf, filename):
     url = destination["url"].rstrip("/") + "/" + quote(filename)
     with client(settings) as connection:
         connection.auth = (destination.get("username", ""), destination.get("password", ""))
-        existing = connection.get(url)
-        if existing.status_code == 200:
-            if hashlib.sha256(existing.content).digest() != hashlib.sha256(pdf.read_bytes()).digest():
+        expected = file_digest(pdf)
+        existing = remote_digest(connection, url)
+        if existing is not None:
+            if existing != expected:
                 raise ValueError("Destination already contains a different file")
             return url
-        if existing.status_code != 404:
-            existing.raise_for_status()
         try:
-            response = connection.put(url, content=pdf.read_bytes(), headers={"If-None-Match": "*", "Content-Type": "application/pdf"})
-            response.raise_for_status()
-            confirmed = connection.get(url)
-            if confirmed.status_code != 200:
-                raise UncertainDelivery("WebDAV accepted the upload but its contents cannot be verified; reconcile later")
-            if hashlib.sha256(confirmed.content).digest() != hashlib.sha256(pdf.read_bytes()).digest():
+            with pdf.open("rb") as source:
+                chunks = iter(lambda: source.read(1024 * 1024), b"")
+                response = connection.put(url, content=chunks, headers={"If-None-Match": "*", "Content-Type": "application/pdf", "Content-Length": str(pdf.stat().st_size)})
+                response.raise_for_status()
+            if remote_digest(connection, url) != expected:
                 raise UncertainDelivery("WebDAV content verification failed; the draft was retained")
         except httpx.TransportError as exc:
             raise UncertainDelivery("WebDAV response lost; reconcile the destination before retrying") from exc

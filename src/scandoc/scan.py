@@ -1,6 +1,8 @@
 """Document geometry shared by the CLI, desktop editor and web service."""
 from pathlib import Path
 import io
+import os
+import tempfile
 import zlib
 
 import cv2
@@ -89,8 +91,10 @@ def write_pdf(images, output_path, page_size="natural", max_bytes=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     offsets = {}
     pages = []
+    temporary = None
     try:
-        with path.open("wb") as output:
+        with tempfile.NamedTemporaryFile(mode="wb", dir=path.parent, prefix="."+path.name+".", suffix=".tmp", delete=False) as output:
+            temporary = Path(output.name)
             def write(data):
                 if max_bytes is not None and output.tell() + len(data) > max_bytes:
                     raise ValueError("Generated PDF exceeds the document byte limit; reduce the number or size of pages")
@@ -145,8 +149,12 @@ def write_pdf(images, output_path, page_size="natural", max_bytes=None):
             for number in range(1, size):
                 write(f"{offsets[number]:010d} 00000 n \n".encode())
             write(f"trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{start}\n%%EOF\n".encode())
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
     except Exception:
-        path.unlink(missing_ok=True)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
         raise
 
 
