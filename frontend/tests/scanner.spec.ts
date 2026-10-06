@@ -22,7 +22,7 @@ test("capture, adjust corners, reorder, preview and download without losing the 
   await page.getByRole("button", { name: "Preview", exact: true }).click();
   await expect(page.getByAltText("Corrected document preview")).toBeVisible();
   await page
-    .getByLabel("Title", { exact: true })
+    .getByLabel("Note", { exact: true })
     .fill(`Office supplies ${test.info().project.name}`);
   await page.getByRole("button", { name: "Create PDF", exact: true }).click();
   await expect(page.getByRole("link", { name: "Download PDF" })).toBeVisible({
@@ -58,7 +58,7 @@ test("installed shell and edited draft survive offline reload", async ({
     .first()
     .setInputFiles(resolve("../tests/fixtures/receipt.png"));
   await page
-    .getByLabel("Title", { exact: true })
+    .getByLabel("Note", { exact: true })
     .fill(`Offline receipt ${test.info().project.name}`);
   await page.waitForTimeout(1800);
   await context.setOffline(true);
@@ -75,7 +75,7 @@ test("installed shell and edited draft survive offline reload", async ({
     })
     .getByRole("button", { name: "Continue", exact: false })
     .click();
-  await expect(page.getByLabel("Title", { exact: true })).toHaveValue(
+  await expect(page.getByLabel("Note", { exact: true })).toHaveValue(
     `Offline receipt ${test.info().project.name}`,
   );
   await expect(

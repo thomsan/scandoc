@@ -98,7 +98,7 @@ def test_ambiguous_paperless_post_never_blindly_resends(tmp_path, monkeypatch):
     assert client.get(f'/api/v1/drafts/{draft}').status_code == 200
     def reconciled(settings, token, method, path, **kwargs):
         assert method == 'GET'
-        return {'results': [{'id': 42, 'title': f'receipt [scandoc-{job}]'}]}
+        return {'results': [{'id': 42, 'title': 'Automatic Paperless title', 'original_file_name': f'document-{job}.pdf'}]}
     monkeypatch.setattr(worker, 'paperless', reconciled)
     client.post(f'/api/v1/jobs/{job}/retry').raise_for_status()
     run_worker_until(app.state.store, job, 'delivered')
@@ -113,7 +113,7 @@ def test_restart_after_submission_marker_reconciles(tmp_path, monkeypatch):
     worker.update(app.state.store, job, 'processing', value)
     def upstream(settings, token, method, path, **kwargs):
         assert method == 'GET', 'Restart must not repeat an uncertain upload'
-        return {'results': [{'id': 42, 'title': f'receipt [scandoc-{job}]'}]}
+        return {'results': [{'id': 42, 'title': 'Automatic Paperless title', 'original_file_name': f'document-{job}.pdf'}]}
     monkeypatch.setattr(worker, 'paperless', upstream)
     run_worker_until(app.state.store, job, 'delivered')
 
@@ -167,3 +167,35 @@ def test_definite_paperless_rejection_can_retry(tmp_path, monkeypatch):
     client.post(f'/api/v1/jobs/{job}/retry').raise_for_status()
     run_worker_until(app.state.store, job, 'delivered')
     assert len(sent)==2
+
+
+def test_lost_note_response_reconciles_without_resending_document(tmp_path, monkeypatch):
+    app, client, draft, job = queued(tmp_path, 'paperless')
+    item = row(app.state.store, job)
+    value = json.loads(item['value'])
+    value['metadata'] = {'note': 'Supplies for the summer event'}
+    worker.update(app.state.store, job, 'queued', value)
+    notes = []
+    uploads = []
+    writes = []
+    def upstream(settings, token, method, path, **kwargs):
+        if path == 'documents/post_document/':
+            assert 'title' not in kwargs['data'] and 'created' not in kwargs['data']
+            uploads.append(path)
+            return 'ingestion-task'
+        if path == 'tasks/':
+            return [{'status': 'SUCCESS', 'related_document': 42}]
+        if path == 'documents/42/notes/':
+            if method == 'POST':
+                writes.append(path)
+                notes.append({'note': kwargs['json']['note'], 'user': {'id': 'local'}})
+                raise httpx.ReadTimeout('Note saved but response lost')
+            return notes
+        raise AssertionError(path)
+    monkeypatch.setattr(worker, 'paperless', upstream)
+    run_worker_until(app.state.store, job, 'uncertain')
+    assert client.get(f'/api/v1/drafts/{draft}').status_code == 200
+    client.post(f'/api/v1/jobs/{job}/retry').raise_for_status()
+    run_worker_until(app.state.store, job, 'delivered')
+    assert len(uploads) == len(writes) == len(notes) == 1
+    assert client.get(f'/api/v1/drafts/{draft}').status_code == 404

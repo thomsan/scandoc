@@ -29,7 +29,20 @@ type Job = {
   download?: string;
   location?: string;
   error?: string;
+  phase?: string;
 };
+function jobStatus(job: Job) {
+  if (job.status === "uncertain" && job.phase === "upload" && !job.error)
+    return "Sending to Paperless…";
+  if (job.status === "processing" || job.status === "waiting") {
+    if (job.phase === "upload") return "Sending to Paperless…";
+    if (job.phase === "note") return "Saving note…";
+    if (job.phase === "ocr" || job.status === "waiting")
+      return "Reading in Paperless…";
+    return "Creating PDF…";
+  }
+  return job.status;
+}
 let csrf = "";
 let authRevision = 0;
 let sessionQueue: Promise<unknown> = Promise.resolve();
@@ -193,10 +206,10 @@ function App() {
           }
           await db.save({
             id: entry.id,
-            title: entry.title,
+            note: entry.note ?? entry.title ?? "",
             filename: (entry.title || "document") + ".pdf",
             type: "",
-            created: "",
+
             tags: [],
             correspondent: "",
             destination:
@@ -382,11 +395,11 @@ function App() {
       await persist({
         id: crypto.randomUUID(),
         owner: session.owner,
-        title: "",
+        note: "",
         filename: "document.pdf",
         pages: [],
         type: "",
-        created: "",
+
         tags: [],
         correspondent: "",
         destination:
@@ -412,7 +425,7 @@ function App() {
       );
     await api("/drafts", {
       method: "POST",
-      body: json({ id: input.id, title: input.title }),
+      body: json({ id: input.id, note: input.note }),
     });
     const next = { ...input, pages: [...input.pages] };
     const remote = await api(`/drafts/${input.id}`);
@@ -494,11 +507,11 @@ function App() {
       current = {
         id: crypto.randomUUID(),
         owner: session.owner,
-        title: "",
+        note: "",
         filename: "document.pdf",
         pages: [],
         type: "",
-        created: "",
+
         tags: [],
         correspondent: "",
         destination:
@@ -625,8 +638,7 @@ function App() {
             filename: next.filename,
             page_size: next.pageSize,
             metadata: {
-              title: next.title,
-              created: next.created,
+              note: next.note,
               document_type: next.type ? Number(next.type) : undefined,
               tags: next.tags,
               correspondent: next.correspondent
@@ -675,7 +687,7 @@ function App() {
     return (
       <main className="login">
         <img src="/icon.svg" width="64" height="64" alt="" />
-        <p className="eyebrow">PAPER, MEET ORDER</p>
+
         <h1>
           Your documents.
           <br />
@@ -740,7 +752,7 @@ function App() {
           }}
         >
           <img src="/icon.svg" width="36" height="36" alt="" />
-          scandoc<span>Less paper. More clarity.</span>
+          scandoc
         </a>
         <nav>
           <span className={online ? "connection" : "connection offline"}>
@@ -799,16 +811,7 @@ function App() {
         <main className="home">
           <section className="hero">
             <div>
-              <p className="eyebrow">YOUR DOCUMENT WORKSPACE</p>
-              <h1>
-                A little less paper.
-                <br />A lot more order.
-              </h1>
-              <p>
-                Turn a photo into a clear, straight document.
-                <br />
-                Review it, give it a home, and get on with your day.
-              </p>
+              <h1>Documents</h1>
               <button className="primary" onClick={newDraft}>
                 <Icon name="plus" /> New document
               </button>
@@ -816,28 +819,13 @@ function App() {
                 <Icon name="camera" /> Take photo
               </button>
             </div>
-            <div className="paper-art" aria-hidden="true">
-              <div className="paper">
-                <span>RECEIPT</span>
-                <hr />
-                <i />
-                <i />
-                <i />
-                <hr />
-                <strong>
-                  All in order <Icon name="check" />
-                </strong>
-              </div>
-              <span className="art-label">From paper to possibility.</span>
-            </div>
           </section>
           <div className="section-title">
             <h2>
               Unfinished drafts <span>{list.length}</span>
             </h2>
             <small>
-              {(storage / 1024 / 1024).toFixed(1)} MB on this device · kept
-              until you delete them
+              {(storage / 1024 / 1024).toFixed(1)} MB on this device
             </small>
           </div>
           <div className="draft-grid">
@@ -846,11 +834,10 @@ function App() {
                 <div className="draft-symbol">
                   <Icon name="file" />
                 </div>
-                <h3>{item.title || "Untitled document"}</h3>
+                <h3>{item.note || "Untitled document"}</h3>
                 <p>
                   {item.pages.length}{" "}
-                  {item.pages.length === 1 ? "page" : "pages"} · saved on this
-                  device
+                  {item.pages.length === 1 ? "page" : "pages"}
                 </p>
                 <div>
                   <button
@@ -872,9 +859,7 @@ function App() {
             ))}
           </div>
           {!list.length && (
-            <div className="empty-drafts">
-              A clean slate. Your unfinished scans will appear here.
-            </div>
+            <div className="empty-drafts">No unfinished drafts.</div>
           )}
           <section className="history">
             <h2>Recent deliveries</h2>
@@ -891,8 +876,8 @@ function App() {
                     {job.status === "delivered"
                       ? "Delivered"
                       : job.status === "ready"
-                        ? "PDF ready — draft retained"
-                        : job.status}
+                        ? "PDF ready"
+                        : jobStatus(job)}
                   </span>
                   {job.location?.startsWith("https://") && (
                     <a href={job.location} target="_blank" rel="noreferrer">
@@ -914,16 +899,11 @@ function App() {
               <button className="back" onClick={() => setDraft(null)}>
                 ← All documents
               </button>
-              <h1>{draft.title || "New document"}</h1>
+              <h1>New document</h1>
             </div>
             <span className="saved">
               {busy ? "Working…" : "Saved on this device"}
             </span>
-          </div>
-          <div className="steps">
-            <span className="active">1 Capture</span>
-            <span className={draft.pages.length ? "active" : ""}>2 Review</span>
-            <span>3 Give it a home</span>
           </div>
           <div className="editor-layout">
             <aside className="pages">
@@ -1002,10 +982,6 @@ function App() {
               >
                 <Icon name="camera" /> Take photo
               </button>
-              <small className="note">
-                Each photo becomes one page. Keep receipts flat and include all
-                four corners.
-              </small>
             </aside>
             <section
               className="scan-panel"
@@ -1250,12 +1226,7 @@ function App() {
                   <div className="capture-icon">
                     <Icon name="upload" />
                   </div>
-                  <h2>Bring your paper into focus.</h2>
-                  <p>
-                    Choose images or take a photo.
-                    <br />
-                    You can add more pages as you go.
-                  </p>
+                  <h2>Add pages</h2>
                   <button
                     className="primary"
                     onClick={() => files.current?.click()}
@@ -1272,22 +1243,17 @@ function App() {
               )}
             </section>
             <aside className="document-details">
-              <p className="eyebrow">GIVE IT A HOME</p>
-              <h2>Document details</h2>
+              <h2>Save</h2>
               <fieldset disabled={locked || busy}>
                 <label>
-                  Title
-                  <input
-                    placeholder="e.g. October office supplies"
-                    value={draft.title}
-                    onChange={(e) => modify({ title: e.target.value })}
-                  />
-                </label>
-                <label>
-                  PDF filename
-                  <input
-                    value={draft.filename}
-                    onChange={(e) => modify({ filename: e.target.value })}
+                  Note
+                  <textarea
+                    aria-label="Note"
+                    rows={2}
+                    maxLength={2000}
+                    placeholder="Optional: project, event or purpose"
+                    value={draft.note}
+                    onChange={(e) => modify({ note: e.target.value })}
                   />
                 </label>
                 <label>
@@ -1304,94 +1270,6 @@ function App() {
                     ))}
                   </select>
                 </label>
-                {session.admin &&
-                  destinations.some((d) => d.kind === "paperless") && (
-                    <div className="new-type">
-                      <input
-                        aria-label="New document type"
-                        placeholder="New type name"
-                        value={newType}
-                        onChange={(e) => setNewType(e.target.value)}
-                      />
-                      <button
-                        disabled={!newType || !online}
-                        onClick={() =>
-                          void perform(async () => {
-                            const created = await api("/document-types", {
-                              method: "POST",
-                              body: json({ name: newType }),
-                            });
-                            setTypes([...types, created]);
-                            modify({ type: String(created.id) });
-                            setNewType("");
-                          })
-                        }
-                      >
-                        Add
-                      </button>
-                    </div>
-                  )}
-                <small className="note">
-                  Paperless uses this type to choose its workflow.
-                </small>
-                <label>
-                  Document date
-                  <input
-                    type="date"
-                    value={draft.created}
-                    onChange={(e) => modify({ created: e.target.value })}
-                  />
-                </label>
-                {correspondents.length > 0 && (
-                  <label>
-                    Correspondent
-                    <select
-                      value={draft.correspondent}
-                      onChange={(e) =>
-                        modify({ correspondent: e.target.value })
-                      }
-                    >
-                      <option value="">Let Paperless choose</option>
-                      {correspondents.map((t) => (
-                        <option value={t.id} key={t.id}>
-                          {t.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                )}
-                {tags.length > 0 && (
-                  <label>
-                    Tags
-                    <select
-                      multiple
-                      value={draft.tags.map(String)}
-                      onChange={(e) =>
-                        modify({
-                          tags: Array.from(e.target.selectedOptions, (o) =>
-                            Number(o.value),
-                          ),
-                        })
-                      }
-                    >
-                      {tags.map((t) => (
-                        <option value={t.id} key={t.id}>
-                          {t.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                )}
-                <label>
-                  Page size
-                  <select
-                    value={draft.pageSize}
-                    onChange={(e) => modify({ pageSize: e.target.value })}
-                  >
-                    <option value="natural">Fit each document</option>
-                    <option value="a4">A4 with margins</option>
-                  </select>
-                </label>
                 <label>
                   Destination
                   <select
@@ -1405,6 +1283,93 @@ function App() {
                     ))}
                   </select>
                 </label>
+                <details className="export-options">
+                  <summary>More options</summary>
+                  <label>
+                    PDF filename
+                    <input
+                      value={draft.filename}
+                      onChange={(e) => modify({ filename: e.target.value })}
+                    />
+                  </label>
+                  {session.admin &&
+                    destinations.some((d) => d.kind === "paperless") && (
+                      <div className="new-type">
+                        <input
+                          aria-label="New document type"
+                          placeholder="New type name"
+                          value={newType}
+                          onChange={(e) => setNewType(e.target.value)}
+                        />
+                        <button
+                          disabled={!newType || !online}
+                          onClick={() =>
+                            void perform(async () => {
+                              const created = await api("/document-types", {
+                                method: "POST",
+                                body: json({ name: newType }),
+                              });
+                              setTypes([...types, created]);
+                              modify({ type: String(created.id) });
+                              setNewType("");
+                            })
+                          }
+                        >
+                          Add
+                        </button>
+                      </div>
+                    )}
+                  {correspondents.length > 0 && (
+                    <label>
+                      Correspondent
+                      <select
+                        value={draft.correspondent}
+                        onChange={(e) =>
+                          modify({ correspondent: e.target.value })
+                        }
+                      >
+                        <option value="">Let Paperless choose</option>
+                        {correspondents.map((t) => (
+                          <option value={t.id} key={t.id}>
+                            {t.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  {tags.length > 0 && (
+                    <label>
+                      Tags
+                      <select
+                        multiple
+                        value={draft.tags.map(String)}
+                        onChange={(e) =>
+                          modify({
+                            tags: Array.from(e.target.selectedOptions, (o) =>
+                              Number(o.value),
+                            ),
+                          })
+                        }
+                      >
+                        {tags.map((t) => (
+                          <option value={t.id} key={t.id}>
+                            {t.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  <label>
+                    Page size
+                    <select
+                      value={draft.pageSize}
+                      onChange={(e) => modify({ pageSize: e.target.value })}
+                    >
+                      <option value="natural">Fit each document</option>
+                      <option value="a4">A4 with margins</option>
+                    </select>
+                  </label>
+                </details>
               </fieldset>
               <button
                 className="primary send"
@@ -1416,17 +1381,17 @@ function App() {
                   : "Save document"}
                 <Icon name="arrow" />
               </button>
-              <small className="note">
-                {online
-                  ? "Delivered scan files are deleted. Downloads stay as drafts until you discard them."
-                  : "Your draft is safe here. Reconnect to create and send the PDF."}
-              </small>
+              {!online && (
+                <small className="note">
+                  Saved offline. Reconnect to send.
+                </small>
+              )}
               {currentJob && (
                 <div className={"job " + currentJob.status}>
                   <strong>
                     {currentJob.status === "ready"
                       ? "Your PDF is ready"
-                      : currentJob.status}
+                      : jobStatus(currentJob)}
                   </strong>
                   {currentJob.error && <p>{currentJob.error}</p>}
                   {currentJob.download && (
@@ -1477,12 +1442,6 @@ function App() {
           </div>
         </main>
       )}
-      <footer>
-        Scandoc <span>Your paper, in order.</span>
-        <small>
-          Documents stay on your device and configured local services.
-        </small>
-      </footer>
       {settings && (
         <SettingsDialog
           close={() => {

@@ -34,6 +34,7 @@ class Login(BaseModel):
 class DraftInput(BaseModel):
     id: UUID
     title: str = Field(default="", max_length=200)
+    note: str = Field(default="", max_length=2000)
 
 
 class PageEdit(BaseModel):
@@ -220,7 +221,7 @@ def create_app(settings=None):
             raise HTTPException(409, "Identifier unavailable")
         if delivered:
             raise HTTPException(409, "Draft was delivered")
-        draft = store.draft(draft_id, current["owner"]) or {"id": draft_id, "title": body.title, "pages": [], "created": time.time()}
+        draft = store.draft(draft_id, current["owner"]) or {"id": draft_id, "title": body.title, "note": body.note or body.title, "pages": [], "created": time.time()}
         (settings.data_dir / "drafts" / draft_id).mkdir(parents=True, exist_ok=True, mode=0o700)
         store.save_draft(draft, current["owner"])
         return draft
@@ -232,7 +233,9 @@ def create_app(settings=None):
     @app.patch("/api/v1/drafts/{draft_id}")
     def edit_draft(draft_id: str, body: dict, current=Depends(user)):
         draft = draft_for(draft_id, current, True)
-        allowed = {"title", "filename", "type", "created", "tags", "correspondent", "destination", "pageSize"}
+        allowed = {"note", "title", "filename", "type", "created", "tags", "correspondent", "destination", "pageSize"}
+        if "note" in body and (not isinstance(body["note"], str) or len(body["note"]) > 2000):
+            raise ValueError("Note must be text of at most 2000 characters")
         for key, value in body.items():
             if key in allowed:
                 draft[key] = value
@@ -347,7 +350,9 @@ def create_app(settings=None):
             raise ValueError("Unknown destination")
         if body.page_size not in ("natural", "a4") or not re.fullmatch(r"[\w .()-]+\.pdf", body.filename) or body.filename.startswith("."):
             raise ValueError("Choose a safe PDF filename and page size")
-        allowed = {"title", "created", "document_type", "tags", "correspondent"}
+        allowed = {"note", "title", "created", "document_type", "tags", "correspondent"}
+        if "note" in body.metadata and (not isinstance(body.metadata["note"], str) or len(body.metadata["note"]) > 2000):
+            raise ValueError("Note must be text of at most 2000 characters")
         if set(body.metadata) - allowed:
             raise ValueError("Unsupported metadata field")
         for key in ("document_type", "correspondent"):
