@@ -98,11 +98,15 @@ for (const destination of [
     await page
       .getByRole("combobox", { name: "Destination", exact: true })
       .selectOption(destination);
-    if (destination === "paperless")
+    if (destination === "paperless") {
+      await expect(page.getByLabel("Document date", { exact: true })).toHaveCount(0);
       await page
         .getByRole("combobox", { name: "Document type", exact: true })
         .selectOption({ label: "Receipt" });
-    else await page.getByLabel("Document date", { exact: true }).fill("2026-10-06");
+    } else {
+      await expect(page.getByLabel("Document type", { exact: true })).toHaveCount(0);
+      await page.getByLabel("Document date", { exact: true }).fill("2026-10-06");
+    }
     const created = page.waitForResponse(
       (r: any) => r.url().endsWith("/jobs") && r.request().method() === "POST",
     );

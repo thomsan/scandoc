@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 export default defineConfig({
   testDir: "./tests",
+  outputDir: `test-results/${process.env.SCANDOC_TEST_URL ? "hosted" : "standalone"}`,
   testMatch: process.env.SCANDOC_TEST_URL
     ? "hosted.spec.ts"
     : "scanner.spec.ts",
