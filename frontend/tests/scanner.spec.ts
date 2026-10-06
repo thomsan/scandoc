@@ -183,3 +183,22 @@ test("pointer corners align with an undistorted original and show a magnified vi
   expect(Math.abs(after[0] - before[0] - 20 / geometry.scale)).toBeLessThan(2);
   expect(Math.abs(after[1] - before[1] - 15 / geometry.scale)).toBeLessThan(2);
 });
+
+
+test("home is compact and page capture controls appear once", async ({ page }) => {
+  await page.route("**/api/v1/drafts", (route) => route.request().method() === "GET" ? route.fulfill({ json: [] }) : route.continue());
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Documents", exact: true })).toHaveCount(0);
+  const drafts = page.locator("details.drafts");
+  const history = page.locator("details.history");
+  await expect(drafts).not.toHaveAttribute("open", "");
+  await expect(history).not.toHaveAttribute("open", "");
+  await expect(drafts.locator("summary")).toContainText("Drafts");
+  await expect(history.locator("summary")).toHaveText("History");
+  await page.getByRole("button", { name: "New document", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Take photo", exact: true })).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Add images", exact: true })).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Choose images", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "← All documents", exact: true }).click();
+  await expect(drafts).toHaveAttribute("open", "");
+});

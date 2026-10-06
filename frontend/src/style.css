@@ -881,3 +881,9 @@ a {
     font-size: 11px;
   }
 }
+
+.home { padding-top: 16px; }
+.home-actions { display: flex; margin-bottom: 20px; }
+.home-actions button { margin-right: 8px; }
+.home details > summary { cursor: pointer; font-weight: 650; font-size: 18px; padding: 12px 0; }
+.home details > summary span { font-size: 12px; color: #718570; margin-left: 6px; }

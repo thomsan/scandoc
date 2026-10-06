@@ -35,8 +35,9 @@ self.addEventListener("fetch", (event) => {
   if (
     event.request.method !== "GET" ||
     url.origin !== self.location.origin ||
-    url.pathname.startsWith("/api/") ||
-    url.pathname === "/health"
+    !(url.pathname === "/" ||
+      url.pathname.startsWith("/assets/") ||
+      ["/manifest.webmanifest", "/icon.svg", "/icon-192.png", "/icon-512.png"].includes(url.pathname))
   )
     return;
   event.respondWith(

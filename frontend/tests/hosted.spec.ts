@@ -130,8 +130,24 @@ for (const destination of [
       expect((await event).suggestedFilename()).toBe("document.pdf");
     } else
       await expect(
-        page.getByRole("heading", { name: "Documents", exact: true }),
+        page.getByRole("button", { name: "New document", exact: true }),
       ).toBeVisible({ timeout: 10000 });
+    if (destination === "paperless") {
+      await page.evaluate(() => navigator.serviceWorker.ready);
+      const delivered = await (await page.request.get("/api/v1/jobs/" + job.id)).json();
+      await page.locator("details.history > summary").click();
+      const opened = page.waitForEvent("popup");
+      await page.locator(`a[href="${delivered.location}"]`).click();
+      const archive = await opened;
+      await archive.locator('input[name="login"]').fill("scanner-team");
+      await archive.locator('input[name="password"]').fill(credentials.TEST_TEAM_PASSWORD);
+      await archive.locator('button[type="submit"]').click();
+      await expect(archive).toHaveURL(delivered.location);
+      await expect(archive.locator("pngx-document-detail")).toBeVisible({ timeout: 20000 });
+      await archive.close();
+      await page.reload();
+      await expect(page.getByRole("button", { name: "New document", exact: true })).toBeVisible();
+    }
   });
 }
 test("logout hides retained drafts; another account cannot read them; same account restores them", async ({
