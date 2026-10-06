@@ -20,7 +20,8 @@ body {
 }
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 button,
@@ -169,7 +170,7 @@ h3 {
   justify-content: space-between;
   align-items: center;
   gap: 30px;
-  padding: 25px 0 65px;
+  padding: 0 0 24px;
 }
 .hero p:not(.eyebrow) {
   font-size: 15px;
@@ -345,6 +346,7 @@ small {
   grid-template-columns: 190px minmax(260px, 1fr) 270px;
   gap: 22px;
   align-items: start;
+  margin-top: 18px;
 }
 .pages,
 .document-details {
@@ -516,9 +518,25 @@ small {
   font-size: 10px;
 }
 .document-details input,
-.document-details select {
+.document-details select,
+.document-details textarea {
   font-size: 11px;
   padding: 9px;
+}
+.document-details textarea {
+  display: block;
+  width: 100%;
+  resize: vertical;
+  border: 1px solid #dfe3d8;
+  border-radius: 6px;
+  background: #fff;
+  margin-top: 6px;
+}
+.export-options summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: #496e49;
+  padding: 8px 0;
 }
 .document-details fieldset {
   border: 0;

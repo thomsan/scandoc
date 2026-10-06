@@ -93,7 +93,7 @@ for (const destination of [
     await page.getByRole("button", { name: "Preview", exact: true }).click();
     await expect(page.getByAltText("Corrected document preview")).toBeVisible();
     await page
-      .getByLabel("Title", { exact: true })
+      .getByLabel("Note", { exact: true })
       .fill(`Hosted ${destination} ${test.info().project.name} ${Date.now()}`);
     await page
       .getByRole("combobox", { name: "Destination", exact: true })
@@ -130,7 +130,7 @@ for (const destination of [
       expect((await event).suggestedFilename()).toBe("document.pdf");
     } else
       await expect(
-        page.getByRole("heading", { name: /A little less paper/ }),
+        page.getByRole("heading", { name: "Documents", exact: true }),
       ).toBeVisible({ timeout: 10000 });
   });
 }
@@ -145,18 +145,18 @@ test("logout hides retained drafts; another account cannot read them; same accou
     .first()
     .setInputFiles(resolve("../tests/fixtures/receipt.png"));
   const name = `Private draft ${test.info().project.name} ${Date.now()}`;
-  await page.getByLabel("Title", { exact: true }).fill(name);
+  await page.getByLabel("Note", { exact: true }).fill(name);
   await expect
     .poll(
       async () => {
         const synced = await (await page.request.get("/api/v1/drafts")).json();
-        return synced.some((d: any) => d.title === name);
+        return synced.some((d: any) => d.note === name);
       },
       { timeout: 20000 },
     )
     .toBe(true);
   const drafts = await (await page.request.get("/api/v1/drafts")).json();
-  const draft = drafts.find((d: any) => d.title === name);
+  const draft = drafts.find((d: any) => d.note === name);
   expect(draft).toBeTruthy();
   await page.evaluate(() => navigator.serviceWorker.ready);
   // A disconnected logout must hide drafts before the server cookie is revoked.

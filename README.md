@@ -54,6 +54,16 @@ instead of silently dropping pages. Device downloads retain drafts until deletio
 confirmed folder, WebDAV and Paperless delivery delete server and phone source files.
 An uncertain Paperless upload must be reconciled before any resend.
 
+The scanner's main save form contains an optional **Note**, document type and
+destination. Extra export settings are under **More options**. Paperless extracts
+the document date and manages its title through archive workflows; Scandoc does
+not submit title or date overrides. Notes are added with the uploader's identity
+after ingestion and reconciled before cleanup, including after a lost response.
+Older drafts retain their former title as the Note. For older API clients,
+`metadata.title` also becomes a note and `metadata.created` does not override the
+Paperless date. Status phases distinguish PDF creation, transfer and Paperless
+reading; delivery records include their measured durations.
+
 Run `pytest tests` and `npm run test:e2e --prefix frontend` after building the UI.
 Hosted browser tests use `SCANDOC_TEST_URL` and the disposable back-office fixture's
 `.env`; never point them at a production archive. Native phone acceptance is separate.

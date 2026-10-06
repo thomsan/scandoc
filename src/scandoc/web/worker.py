@@ -31,11 +31,14 @@ def process(store, row, processing_slot=None):
         raise ValueError("Destination no longer exists")
     credential = store.decrypt(value["credential"])
     token = credential.get("token")
-    if destination["kind"] == "paperless" and not value.get("task_id") and row["status"] != "uncertain":
+    if destination["kind"] == "paperless" and not value.get("task_id") and not value.get("document_id") and row["status"] != "uncertain":
         metadata = value["metadata"]
         if metadata.get("document_type"):
             paperless(settings, token, "GET", f"document_types/{metadata['document_type']}/")
     if not pdf.exists() and not value.get("task_id"):
+        value["phase"] = "pdf"
+        update(store, row["id"], "processing", value)
+        started = time.monotonic()
         def pages():
             for page in draft["pages"]:
                 yield correct_image(load_image(directory / (page["id"] + ".png"), settings.max_pixels), page["corners"], page.get("rotation", 0), page.get("mode", "color"))
@@ -48,6 +51,7 @@ def process(store, row, processing_slot=None):
         with temporary_pdf.open("rb") as completed_pdf:
             os.fsync(completed_pdf.fileno())
         os.replace(temporary_pdf, pdf)
+        value.setdefault("timings", {})["pdf_seconds"] = round(time.monotonic()-started, 3)
     filename = value["filename"][:-4] + "-" + row["id"] + ".pdf"
     if destination["kind"] == "download":
         value["download"] = f"/api/v1/jobs/{row['id']}/download"
@@ -59,23 +63,25 @@ def process(store, row, processing_slot=None):
     elif destination["kind"] == "webdav":
         value["location"] = deliver_webdav(settings, destination, pdf, filename)
     elif destination["kind"] == "paperless":
-        # A stable title marker allows reconciliation after a lost POST response.
-        marker = f"scandoc-{row['id']}"
-        if (row["status"] == "uncertain" or value.get("submission_started")) and not value.get("task_id"):
-            candidates = results(paperless(settings, token, "GET", "documents/", params={"title__icontains": marker}))
-            exact = [d for d in candidates if marker in d["title"]]
+        # Original filenames remain stable when Paperless workflows rename titles.
+        if (row["status"] == "uncertain" or value.get("submission_started")) and not value.get("task_id") and not value.get("document_id"):
+            candidates = results(paperless(settings, token, "GET", "documents/", params={"original_filename__iexact": filename}))
+            exact = [d for d in candidates if d.get("original_file_name", "").casefold() == filename.casefold()]
             if len(exact) != 1:
                 raise UncertainDelivery("No unique completed document found yet; reconcile again later. No file was resent.")
             value["document_id"] = exact[0]["id"]
         if not value.get("task_id") and not value.get("document_id"):
             metadata = value["metadata"]
-            data = {k: str(v) for k, v in metadata.items() if v and k != "tags"}
-            data["title"] = f"{str(metadata.get('title') or value['filename'][:-4])[:80]} [{marker}]"
+            # Paperless extracts the date and owns title formatting. Old clients'
+            # title values become notes instead of overriding archive metadata.
+            data = {k: str(v) for k, v in metadata.items() if v and k in ("document_type", "correspondent")}
             if metadata.get("tags"):
                 data["tags"] = [str(tag) for tag in metadata["tags"]]
             # Commit the uncertain state BEFORE sending to prevent blind POST replay.
             value["submission_started"] = True
+            value["phase"] = "upload"
             update(store, row["id"], "uncertain", value)
+            started = time.monotonic()
             try:
                 with pdf.open("rb") as file:
                     value["task_id"] = paperless(settings, token, "POST", "documents/post_document/", data=data, files={"document": (filename, file, "application/pdf")})
@@ -87,6 +93,9 @@ def process(store, row, processing_slot=None):
                     update(store, row["id"], "failed", value)
                     raise
                 raise UncertainDelivery("Paperless upload outcome is uncertain; reconcile before resending") from exc
+            value.setdefault("timings", {})["upload_seconds"] = round(time.monotonic()-started, 3)
+            value["ingestion_started_at"] = time.time()
+            value["phase"] = "ocr"
             update(store, row["id"], "waiting", value)
         if value.get("task_id") and not value.get("document_id"):
             tasks = results(paperless(settings, token, "GET", "tasks/", params={"task_id": value["task_id"]}))
@@ -103,6 +112,25 @@ def process(store, row, processing_slot=None):
             value["document_id"] = task.get("related_document") or next(iter(task.get("related_document_ids", [])), None)
             if not value["document_id"]:
                 raise UncertainDelivery("Paperless completed without a document identifier")
+            if value.get("ingestion_started_at"):
+                value.setdefault("timings", {})["paperless_seconds"] = round(time.time()-value["ingestion_started_at"], 3)
+        note = str(value["metadata"].get("note", value["metadata"].get("title", "")) or "").strip()
+        if note:
+            # Persist the document ID before adding a note: restart/retry must
+            # finish metadata delivery without uploading a second document.
+            value["phase"] = "note"
+            update(store, row["id"], "waiting", value)
+            path = f"documents/{value['document_id']}/notes/"
+            def contains_note(notes):
+                return any(n.get("note") == note and str((n.get("user") or {}).get("id")) == str(row["owner"]) for n in notes)
+            try:
+                notes = paperless(settings, token, "GET", path)
+                if not contains_note(notes):
+                    notes = paperless(settings, token, "POST", path, json={"note": note})
+                if not contains_note(notes):
+                    raise UncertainDelivery("Paperless note was not confirmed; reconcile before retrying")
+            except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+                raise UncertainDelivery("Document ingested; note delivery needs reconciliation. No PDF will be resent.") from exc
         public = settings.paperless_public_url or settings.paperless_url
         value["location"] = public.rstrip("/") + f"/documents/{value['document_id']}/details"
     value.pop("credential", None)
