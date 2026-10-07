@@ -69,7 +69,7 @@ class Store:
 
     def job(self, job_id, owner):
         with self.connect() as db:
-            row = db.execute("SELECT * FROM jobs WHERE id=? AND owner=?", (job_id, owner)).fetchone()
+            row = db.execute("SELECT * FROM jobs WHERE id=? AND owner=? AND draft NOT IN (SELECT id FROM deleted_documents)", (job_id, owner)).fetchone()
         return {**json.loads(row["value"]), "id": row["id"], "draft_id": row['draft'], "status": row["status"]} if row else None
 
     def mark_archived(self, draft_id, owner):

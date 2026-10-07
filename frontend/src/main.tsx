@@ -1066,11 +1066,13 @@ function App() {
                         Download PDF
                       </a>
                     )}
-                    {job.location?.startsWith("https://") && (
-                      <a href={job.location} target="_blank" rel="noreferrer">
-                        Open document ↗
-                      </a>
-                    )}
+                    {destinations.find((d) => d.id === job.destination)
+                      ?.kind === "paperless" &&
+                      job.location?.startsWith("https://") && (
+                        <a href={job.location} target="_blank" rel="noreferrer">
+                          Open document ↗
+                        </a>
+                      )}
                     {job.error && <small>{job.error}</small>}
                     {["failed", "uncertain"].includes(job.status) && (
                       <button
@@ -1635,15 +1637,16 @@ function App() {
                       Download PDF
                     </a>
                   )}
-                  {currentJob.location?.startsWith("https://") && (
-                    <a
-                      href={currentJob.location}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      Open document ↗
-                    </a>
-                  )}
+                  {usesPaperless &&
+                    currentJob.location?.startsWith("https://") && (
+                      <a
+                        href={currentJob.location}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Open document ↗
+                      </a>
+                    )}
                   {["failed", "uncertain"].includes(currentJob.status) && (
                     <button
                       onClick={() =>

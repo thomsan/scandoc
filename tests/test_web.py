@@ -275,6 +275,8 @@ def test_pending_manual_deletion_recovers_on_restart(application, client, tmp_pa
     with pytest.raises(OSError, match='interrupted'):
         application.state.store.delete_documents([draft], 'local')
     assert application.state.store.draft(draft, 'local') is None
+    assert application.state.store.job(job, 'local') is None
+    assert client.get(f'/api/v1/jobs/{job}/download').status_code == 404
     assert client.post('/api/v1/drafts', json={'id':draft}).status_code == 409
     monkeypatch.setattr(module.shutil, 'rmtree', original)
     recovered = module.Store(application.state.settings)
@@ -299,3 +301,20 @@ def test_history_is_account_scoped_and_redacts_job_credentials(application, clie
     with pytest.raises(ValueError, match='not found'):
         store.delete_documents([draft], 'another-account')
     assert store.draft(draft, 'local') is not None
+
+
+def test_download_started_before_explicit_deletion_finishes_without_missing_file_error(application, client, monkeypatch):
+    import scandoc.web.app as module
+    draft, _, _ = make_draft(client)
+    job = str(uuid4())
+    client.post(f'/api/v1/drafts/{draft}/jobs', json={'id':job,'destination':'download'}).raise_for_status()
+    run_job(application, job)
+    expected = client.get(f'/api/v1/jobs/{job}/download').content
+    original = module.StreamingResponse
+    def delete_before_streaming(*args, **kwargs):
+        application.state.store.delete_documents([draft], 'local')
+        return original(*args, **kwargs)
+    monkeypatch.setattr(module, 'StreamingResponse', delete_before_streaming)
+    response = client.get(f'/api/v1/jobs/{job}/download')
+    assert response.status_code == 200 and response.content == expected
+    assert client.get(f'/api/v1/jobs/{job}/download').status_code == 404

@@ -149,6 +149,14 @@ for (const destination of [
     ).json();
     expect(retained.archived).toBe(true);
     expect(retained.pages).toHaveLength(2);
+    const historyItem = page
+      .locator(".history-document")
+      .filter({ hasText: description });
+    await expect(historyItem).toBeVisible();
+    if (destination === "browser-cloud")
+      await expect(
+        historyItem.getByRole("link", { name: "Open document" }),
+      ).toHaveCount(0);
     if (destination === "paperless") {
       await page.evaluate(() => navigator.serviceWorker.ready);
       const delivered = await (

@@ -1,3 +1,4 @@
+import os
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from urllib.parse import urlparse
@@ -14,7 +15,8 @@ import shutil
 import time
 
 from fastapi import FastAPI, Request, HTTPException, UploadFile, File, Depends
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 import httpx
@@ -305,7 +307,7 @@ def create_app(settings=None):
     @app.get("/api/v1/drafts/{draft_id}/pages/{page_id}/source")
     def source(draft_id: str, page_id: str, current=Depends(user)):
         _, path = page_for(draft_for(draft_id, current), page_id)
-        return FileResponse(path, media_type="image/png")
+        return retained_file(path, "image/png")
 
     @app.patch("/api/v1/drafts/{draft_id}/pages/{page_id}")
     def edit_page(draft_id: str, page_id: str, body: PageEdit, current=Depends(user)):
@@ -404,7 +406,7 @@ def create_app(settings=None):
     def jobs(current=Depends(user)):
         with store.connect() as db:
             ids = [r["id"] for r in db.execute("SELECT id FROM jobs WHERE owner=? AND draft NOT IN (SELECT id FROM deleted_documents) ORDER BY rowid DESC LIMIT 100", (current["owner"],))]
-        return [public_job(store.job(i, current["owner"])) for i in ids]
+        return [public_job(value) for i in ids if (value := store.job(i, current["owner"]))]
 
     @app.get("/api/v1/jobs/{job_id}")
     def job(job_id: str, current=Depends(user)):
@@ -435,11 +437,21 @@ def create_app(settings=None):
         value = store.job(identifier(job_id), current["owner"])
         if not value or value["status"] != "ready":
             raise HTTPException(404, "PDF not ready")
-        return FileResponse(settings.data_dir / "drafts" / _job_draft(job_id) / (job_id + ".pdf"), filename=value["filename"], media_type="application/pdf")
+        return retained_file(settings.data_dir / "drafts" / value['draft_id'] / (job_id + ".pdf"), "application/pdf", value["filename"])
 
-    def _job_draft(job_id):
-        with store.connect() as db:
-            return db.execute("SELECT draft FROM jobs WHERE id=?", (job_id,)).fetchone()["draft"]
+    def retained_file(path, media_type, filename=None):
+        # Open before returning the response: a simultaneous explicit deletion
+        # must not unlink the file between FileResponse's stat and open calls.
+        try:
+            source = path.open('rb')
+        except FileNotFoundError:
+            raise HTTPException(404, "Document file was deleted")
+        headers = dict(FileResponse(path, filename=filename, media_type=media_type).headers)
+        headers['Content-Length'] = str(os.fstat(source.fileno()).st_size)
+        def chunks():
+            with source:
+                yield from iter(lambda: source.read(1024 * 1024), b'')
+        return StreamingResponse(chunks(), headers=headers, media_type=media_type, background=BackgroundTask(source.close))
 
     @app.get("/api/v1/document-types")
     def types(current=Depends(user)):
