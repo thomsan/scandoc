@@ -23,6 +23,8 @@ export type Draft = {
   correspondent: string;
   destination: string;
   pageSize: string;
+  archived?: boolean;
+  finishedJob?: string;
   jobId?: string;
   jobRequest?: Record<string, unknown>;
 };
@@ -35,8 +37,14 @@ const database = openDB("scandoc", 1, {
 export async function drafts(owner: string): Promise<Draft[]> {
   return (await (await database).getAll("drafts"))
     .filter((d) => d.owner === owner)
-    .map((d) => ({ ...d, note: d.note ?? d.title ?? "",
-      created: typeof d.created === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d.created) ? d.created : undefined }));
+    .map((d) => ({
+      ...d,
+      note: d.note ?? d.title ?? "",
+      created:
+        typeof d.created === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d.created)
+          ? d.created
+          : undefined,
+    }));
 }
 export async function save(draft: Draft) {
   await (await database).put("drafts", draft);

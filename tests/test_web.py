@@ -93,7 +93,7 @@ def test_description_folder_name_and_collision_preserve_draft(application, clien
     assert target.read_bytes() == b'existing different document'
 
 
-def test_folder_delivery_cleanup_and_repeated_request(application,client,tmp_path):
+def test_folder_delivery_retains_sources_download_and_repeated_request(application,client,tmp_path):
     destination={'kind':'folder','name':'Archive','root':str(tmp_path/'output')}
     assert client.put('/api/v1/admin/destinations/archive',json=destination).status_code==200
     draft,page,_=make_draft(client)
@@ -102,12 +102,19 @@ def test_folder_delivery_cleanup_and_repeated_request(application,client,tmp_pat
     job=str(uuid4());body={'id':job,'destination':'archive'}
     client.post(f'/api/v1/drafts/{draft}/jobs',json=body);run_job(application,job)
     assert client.get(f'/api/v1/jobs/{job}').json()['status']=='delivered'
-    assert client.get(f'/api/v1/drafts/{draft}').status_code==404
-    assert not (tmp_path/'drafts'/draft).exists()
-    assert client.get(f'/api/v1/jobs/{download_job}/download').status_code == 404
+    assert client.get(f'/api/v1/drafts/{draft}').json()['archived'] is True
+    assert (tmp_path/'drafts'/draft).exists()
+    assert client.get(f'/api/v1/jobs/{download_job}/download').content.startswith(b'%PDF')
+    history = client.get('/api/v1/history').json()
+    assert len(history) == 1 and len(history[0]['jobs']) == 2
+    assert history[0]['available'] is True
     assert len(list((tmp_path/'output').glob('*.pdf')))==1
     assert client.post(f'/api/v1/drafts/{draft}/jobs',json=body).json()['status']=='delivered'
-    assert client.post('/api/v1/drafts',json={'id':draft}).status_code==409
+    assert client.post('/api/v1/drafts',json={'id':draft}).status_code==200
+    assert client.delete(f'/api/v1/history/{draft}').status_code == 200
+    assert not (tmp_path/'drafts'/draft).exists()
+    assert len(list((tmp_path/'output').glob('*.pdf'))) == 1
+    assert client.post('/api/v1/drafts',json={'id':draft}).status_code == 409
 
 
 def test_secrets_redacted_encrypted_and_readonly(application,client):
@@ -155,6 +162,14 @@ def test_hosted_security_and_account_isolation(tmp_path,monkeypatch):
     assert bob.get(f'/api/v1/drafts/{draft}').status_code==404
     assert bob.get('/api/v1/admin/destinations').status_code==403
     assert alice.post('/api/v1/drafts',json={'id':str(uuid4())},headers={'x-csrf-token':'wrong'}).status_code==403
+    job = str(uuid4())
+    alice.post(f'/api/v1/drafts/{draft}/jobs', json={'id':job,'destination':'download'}).raise_for_status()
+    run_job(app, job)
+    assert alice.get('/api/v1/history').json()[0]['id'] == draft
+    assert bob.get('/api/v1/history').json() == []
+    assert bob.delete(f'/api/v1/history/{draft}').status_code == 404
+    assert bob.delete('/api/v1/history').json()['ids'] == []
+    assert alice.get(f'/api/v1/jobs/{job}/download').status_code == 200
     assert b'alice-secret-token' not in app.state.store.path.read_bytes()
     assert alice.delete('/api/v1/session').status_code==200
     assert alice.get('/api/v1/session').status_code==401
@@ -221,3 +236,85 @@ def test_page_and_document_limits_preserve_draft(application,client):
     application.state.settings.max_document_bytes=page['bytes']
     assert client.put(url,files={'file':('receipt.png',raw.getvalue())}).status_code==413
     assert len(client.get(f'/api/v1/drafts/{draft}').json()['pages'])==1
+
+
+def test_history_bulk_delete_preserves_drafts_and_refuses_active_exports(application, client, tmp_path):
+    finished = []
+    for _ in range(2):
+        draft, _, _ = make_draft(client)
+        job = str(uuid4())
+        client.post(f'/api/v1/drafts/{draft}/jobs', json={'id':job,'destination':'download'}).raise_for_status()
+        run_job(application, job)
+        finished.append(draft)
+    unfinished, _, _ = make_draft(client)
+    pending = str(uuid4())
+    client.post(f'/api/v1/drafts/{finished[0]}/jobs', json={'id':pending,'destination':'download'}).raise_for_status()
+    assert client.delete('/api/v1/history').status_code == 409
+    assert all((tmp_path/'drafts'/item).exists() for item in finished)
+    run_job(application, pending)
+    result = client.delete('/api/v1/history')
+    assert result.status_code == 200
+    assert set(result.json()['ids']) == set(finished)
+    assert client.get('/api/v1/history').json() == []
+    assert all(not (tmp_path/'drafts'/item).exists() for item in finished)
+    assert client.get(f'/api/v1/drafts/{unfinished}').status_code == 200
+    for item in finished:
+        assert client.post('/api/v1/drafts', json={'id':item}).status_code == 409
+
+
+def test_pending_manual_deletion_recovers_on_restart(application, client, tmp_path, monkeypatch):
+    import scandoc.web.store as module
+    draft, _, _ = make_draft(client)
+    job = str(uuid4())
+    client.post(f'/api/v1/drafts/{draft}/jobs', json={'id':job,'destination':'download'}).raise_for_status()
+    run_job(application, job)
+    original = module.shutil.rmtree
+    def interrupted(*args, **kwargs):
+        raise OSError('Deletion interrupted')
+    monkeypatch.setattr(module.shutil, 'rmtree', interrupted)
+    with pytest.raises(OSError, match='interrupted'):
+        application.state.store.delete_documents([draft], 'local')
+    assert application.state.store.draft(draft, 'local') is None
+    assert application.state.store.job(job, 'local') is None
+    assert client.get(f'/api/v1/jobs/{job}/download').status_code == 404
+    assert client.post('/api/v1/drafts', json={'id':draft}).status_code == 409
+    monkeypatch.setattr(module.shutil, 'rmtree', original)
+    recovered = module.Store(application.state.settings)
+    assert not (tmp_path/'drafts'/draft).exists()
+    assert recovered.job(job, 'local') is None
+    assert recovered.history('local') == []
+
+
+def test_history_is_account_scoped_and_redacts_job_credentials(application, client):
+    draft, _, _ = make_draft(client)
+    job = str(uuid4())
+    client.post(f'/api/v1/drafts/{draft}/jobs', json={'id':job,'destination':'download'}).raise_for_status()
+    run_job(application, job)
+    store = application.state.store
+    with store.connect() as connection:
+        value = json.loads(connection.execute('SELECT value FROM jobs WHERE id=?', (job,)).fetchone()['value'])
+        value['credential'] = store.encrypt('private-token')
+        connection.execute('UPDATE jobs SET value=? WHERE id=?', (json.dumps(value), job))
+    assert 'credential' not in client.get('/api/v1/history').text
+    assert 'private-token' not in client.get('/api/v1/history').text
+    assert store.history('another-account') == []
+    with pytest.raises(ValueError, match='not found'):
+        store.delete_documents([draft], 'another-account')
+    assert store.draft(draft, 'local') is not None
+
+
+def test_download_started_before_explicit_deletion_finishes_without_missing_file_error(application, client, monkeypatch):
+    import scandoc.web.app as module
+    draft, _, _ = make_draft(client)
+    job = str(uuid4())
+    client.post(f'/api/v1/drafts/{draft}/jobs', json={'id':job,'destination':'download'}).raise_for_status()
+    run_job(application, job)
+    expected = client.get(f'/api/v1/jobs/{job}/download').content
+    original = module.StreamingResponse
+    def delete_before_streaming(*args, **kwargs):
+        application.state.store.delete_documents([draft], 'local')
+        return original(*args, **kwargs)
+    monkeypatch.setattr(module, 'StreamingResponse', delete_before_streaming)
+    response = client.get(f'/api/v1/jobs/{job}/download')
+    assert response.status_code == 200 and response.content == expected
+    assert client.get(f'/api/v1/jobs/{job}/download').status_code == 404

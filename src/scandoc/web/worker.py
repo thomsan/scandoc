@@ -2,7 +2,6 @@ import json
 from contextlib import nullcontext
 import multiprocessing
 import os
-import shutil
 import time
 from pathlib import Path
 
@@ -61,6 +60,7 @@ def process(store, row, processing_slot=None):
         value["download"] = f"/api/v1/jobs/{row['id']}/download"
         value.pop("credential", None)
         update(store, row["id"], "ready", value)
+        store.mark_archived(draft['id'], row['owner'])
         return
     if destination["kind"] == "folder":
         value["location"] = deliver_folder(destination, pdf, filename)
@@ -156,11 +156,7 @@ def process(store, row, processing_slot=None):
         value["location"] = public.rstrip("/") + f"/documents/{value['document_id']}/details"
     value.pop("credential", None)
     update(store, row["id"], "delivered", value)
-    # Save the delivery receipt before cleanup. Startup also completes interrupted cleanup.
-    shutil.rmtree(directory, ignore_errors=True)
-    with store.connect() as db:
-        db.execute("UPDATE jobs SET status='discarded' WHERE draft=? AND status='ready'", (draft["id"],))
-        db.execute("DELETE FROM drafts WHERE id=? AND owner=?", (draft["id"], row["owner"]))
+    store.mark_archived(draft['id'], row['owner'])
 
 
 def run(settings, stop, processing_slot=None):
@@ -172,10 +168,6 @@ def run(settings, stop, processing_slot=None):
             temporary.unlink(missing_ok=True)
     with store.connect() as db:
         db.execute("UPDATE jobs SET status='queued' WHERE status='processing'")
-        for row in db.execute("SELECT draft,owner FROM jobs WHERE status='delivered'").fetchall():
-            shutil.rmtree(settings.data_dir / "drafts" / row["draft"], ignore_errors=True)
-            db.execute("DELETE FROM drafts WHERE id=? AND owner=?", (row["draft"], row["owner"]))
-            db.execute("UPDATE jobs SET status='discarded' WHERE draft=? AND status='ready'", (row["draft"],))
     while not stop.is_set():
         with store.connect() as db:
             db.execute("BEGIN IMMEDIATE")

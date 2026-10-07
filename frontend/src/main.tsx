@@ -24,6 +24,7 @@ type Destination = {
 type Job = {
   id: string;
   filename: string;
+  draft_id: string;
   archive?: { title: string; created: string; filename: string };
   destination: string;
   status: string;
@@ -32,12 +33,23 @@ type Job = {
   error?: string;
   phase?: string;
 };
+type HistoryItem = {
+  id: string;
+  description: string;
+  available: boolean;
+  jobs: Job[];
+};
+const activeDelivery = (job: Job) =>
+  ["queued", "processing", "waiting", "uncertain", "reconciling"].includes(
+    job.status,
+  );
 function jobStatus(job: Job) {
   if (job.status === "uncertain" && job.phase === "upload" && !job.error)
     return "Sending to Paperless…";
   if (job.status === "processing" || job.status === "waiting") {
     if (job.phase === "upload") return "Sending to Paperless…";
-    if (job.phase === "note" || job.phase === "description") return "Saving description…";
+    if (job.phase === "note" || job.phase === "description")
+      return "Saving description…";
     if (job.phase === "ocr" || job.status === "waiting")
       return "Reading in Paperless…";
     return "Creating PDF…";
@@ -45,8 +57,13 @@ function jobStatus(job: Job) {
   return job.status;
 }
 function filenameDescription(description: string) {
-  let label = description.replace(/[^\p{L}\p{N}_ .()-]/gu, "-").replace(/\s+/g, " ").slice(0, 128).trim();
-  while (new TextEncoder().encode(label).length > 180) label = Array.from(label).slice(0, -1).join("");
+  let label = description
+    .replace(/[^\p{L}\p{N}_ .()-]/gu, "-")
+    .replace(/\s+/g, " ")
+    .slice(0, 128)
+    .trim();
+  while (new TextEncoder().encode(label).length > 180)
+    label = Array.from(label).slice(0, -1).join("");
   return label;
 }
 let csrf = "";
@@ -144,6 +161,9 @@ function App() {
       { id: "download", name: "Download to device", kind: "download" },
     ]),
     [jobs, setJobs] = useState<Job[]>([]),
+    [history, setHistory] = useState<HistoryItem[]>([]),
+    [historyOpen, setHistoryOpen] = useState(false),
+    [step, setStep] = useState<1 | 2 | 3>(1),
     [settings, setSettings] = useState(false),
     [storage, setStorage] = useState(0),
     [drag, setDrag] = useState<Point | null>(null),
@@ -168,6 +188,7 @@ function App() {
     setDraft(null);
     setList([]);
     setJobs([]);
+    setHistory([]);
     setSettings(false);
   }
   async function refresh(current: Session) {
@@ -178,6 +199,7 @@ function App() {
     if (!active()) return;
     if (cached) {
       setTypes(cached.types || []);
+      setHistory(cached.history || []);
       setTags(cached.tags || []);
       setCorrespondents(cached.correspondents || []);
       setDestinations(cached.destinations || destinations);
@@ -187,12 +209,13 @@ function App() {
     setList(local);
     if (!navigator.onLine) return;
     try {
-      const [t, d, m, j, remote] = await Promise.all([
+      const [t, d, m, j, remote, h] = await Promise.all([
         api("/document-types"),
         api("/destinations"),
         api("/metadata"),
         api("/jobs"),
         api("/drafts"),
+        api("/history"),
       ]);
       if (!active()) return;
       setTypes(t);
@@ -200,7 +223,14 @@ function App() {
       setTags(m.tags);
       setCorrespondents(m.correspondents);
       setJobs(j);
+      setHistory(h);
       for (const entry of remote) {
+        if (entry.archived) {
+          const retained = local.find((x) => x.id === entry.id);
+          if (retained && !retained.archived)
+            await db.save({ ...retained, archived: true });
+          continue;
+        }
         if (!(await db.drafts(current.owner)).some((x) => x.id === entry.id)) {
           const pages: Page[] = [];
           for (const p of entry.pages) {
@@ -222,11 +252,19 @@ function App() {
               d.find((x: Destination) => x.default)?.id || "download",
             pageSize: "natural",
             ...entry,
-            created: typeof entry.created === "string" && /^\d{4}-\d{2}-\d{2}$/.test(entry.created) ? entry.created : undefined,
+            created:
+              typeof entry.created === "string" &&
+              /^\d{4}-\d{2}-\d{2}$/.test(entry.created)
+                ? entry.created
+                : undefined,
             owner: current.owner,
             pages,
           });
         }
+      }
+      for (const retained of local.filter((x) => x.archived)) {
+        if (!h.some((item: HistoryItem) => item.id === retained.id))
+          await db.remove(retained.id);
       }
       const restored = await db.drafts(current.owner);
       if (!active()) return;
@@ -237,6 +275,7 @@ function App() {
         destinations: d,
         tags: m.tags,
         correspondents: m.correspondents,
+        history: h,
       });
     } catch (e) {
       if (active()) setError((e as Error).message);
@@ -346,24 +385,49 @@ function App() {
   useEffect(() => {
     if (!session || !online) return;
     const revision = authRevision;
+    let polling = false;
     const timer = setInterval(() => {
-      void api("/jobs")
-        .then(async (entries: Job[]) => {
+      if (polling || revision !== authRevision) return;
+      polling = true;
+      void Promise.all([api("/jobs"), api("/history")])
+        .then(async ([entries, completed]: [Job[], HistoryItem[]]) => {
           if (revision !== authRevision) return;
           setJobs(entries);
-          for (const job of entries.filter((j) => j.status === "delivered")) {
+          setHistory(completed);
+          const cached = await db.account(session.owner);
+          if (revision !== authRevision) return;
+          await db.account(session.owner, { ...cached, history: completed });
+          for (const job of entries.filter((j) =>
+            ["ready", "delivered"].includes(j.status),
+          )) {
             const local = (await db.drafts(session.owner)).find(
-              (d) => d.jobId === job.id,
+              (d) => d.jobId === job.id && d.finishedJob !== job.id,
             );
-            if (local) {
-              await db.remove(local.id);
-              if (latest.current?.id === local.id) setDraft(null);
+            if (local && revision === authRevision) {
+              const isOpen = latest.current?.id === local.id;
+              if (isOpen && job.status === "ready" && job.download) {
+                const link = document.createElement("a");
+                link.href = job.download;
+                link.download = "";
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+              }
+              await db.save({ ...local, archived: true, finishedJob: job.id });
+              if (isOpen && revision === authRevision) {
+                latest.current = null;
+                setDraft(null);
+                setHistoryOpen(true);
+              }
             }
           }
           const local = await db.drafts(session.owner);
           if (revision === authRevision) setList(local);
         })
-        .catch(() => {});
+        .catch(() => {})
+        .finally(() => {
+          polling = false;
+        });
     }, 1500);
     return () => clearInterval(timer);
   }, [session?.owner, online]);
@@ -399,6 +463,8 @@ function App() {
     if (!session) return;
     void perform(async () => {
       setSelected(0);
+      setStep(1);
+      setPreview("");
       await persist({
         id: crypto.randomUUID(),
         owner: session.owner,
@@ -613,6 +679,65 @@ function App() {
     if (files.current) files.current.value = "";
     if (camera.current) camera.current.value = "";
   }
+  async function exportHistory(item: HistoryItem) {
+    if (!online) throw new Error("Reconnect to export a saved document");
+    const revision = authRevision,
+      owner = session!.owner;
+    const local = (await db.drafts(owner)).find((d) => d.id === item.id);
+    let restored = local;
+    if (!restored) {
+      const entry = await api(`/drafts/${item.id}`);
+      const pages: Page[] = [];
+      for (const p of entry.pages)
+        pages.push({
+          ...p,
+          blob: await api(`/drafts/${item.id}/pages/${p.id}/source`),
+          edited: true,
+        });
+      restored = {
+        type: "",
+        tags: [],
+        correspondent: "",
+        destination: "download",
+        pageSize: "natural",
+        filename: "document.pdf",
+        ...entry,
+        note: entry.note ?? entry.title ?? "",
+        owner,
+        pages,
+        created: typeof entry.created === "string" ? entry.created : undefined,
+      };
+    }
+    if (revision !== authRevision) return;
+    await persist({ ...restored!, jobId: undefined, jobRequest: undefined });
+    setSelected(0);
+    setPreview("");
+    setStep(3);
+  }
+  async function deleteHistory(item?: { id: string }) {
+    if (!online) throw new Error("Reconnect to delete saved documents");
+    if (
+      !window.confirm(
+        item
+          ? "Delete this document and all its Scandoc files? Delivered copies stay in their destinations."
+          : "Delete all History documents and their Scandoc files? Drafts and delivered copies stay.",
+      )
+    )
+      return;
+    const result = await api(item ? `/history/${item.id}` : "/history", {
+      method: "DELETE",
+    });
+    for (const id of result.ids) await db.remove(id);
+    if (latest.current && result.ids.includes(latest.current.id)) {
+      latest.current = null;
+      setDraft(null);
+    }
+    setList(await db.drafts(session!.owner));
+    const entries = await api("/history");
+    setHistory(entries);
+    const cached = await db.account(session!.owner);
+    await db.account(session!.owner, { ...cached, history: entries });
+  }
   function edit(patch: Partial<Page>) {
     if (!draft || !page) return;
     setPreview("");
@@ -637,7 +762,12 @@ function App() {
   }
   async function send() {
     if (!draft) return;
-    if (!saveDetailsValid) throw new Error(usesPaperless ? "Choose a document type" : "Enter a date and description");
+    if (!saveDetailsValid)
+      throw new Error(
+        usesPaperless
+          ? "Choose a document type"
+          : "Enter a date and description",
+      );
     const next = await sync(draft);
     await persist(next);
     const jobId = next.jobId && !currentJob ? next.jobId : crypto.randomUUID();
@@ -665,7 +795,8 @@ function App() {
     } catch (error: any) {
       // A validation rejection did not enqueue a delivery. Allow corrected
       // details to create a new request; retain the ID for ambiguous responses.
-      if (error.status === 422) await persist({ ...next, jobId: undefined, jobRequest: undefined });
+      if (error.status === 422)
+        await persist({ ...next, jobId: undefined, jobRequest: undefined });
       throw error;
     }
     setJobs(await api("/jobs"));
@@ -690,10 +821,16 @@ function App() {
     if (draft?.id === item.id) setDraft(null);
     setList(await db.drafts(item.owner));
   }
-  const usesPaperless = destinations.find((d) => d.id === draft?.destination)?.kind === "paperless";
+  const unfinished = list.filter((d) => !d.archived);
+  const usesPaperless =
+    destinations.find((d) => d.id === draft?.destination)?.kind === "paperless";
   const description = draft?.note.trim() || "";
-  const generatedFilename = usesPaperless ? "document.pdf" : `${draft?.created || "YYYY-MM-DD"} ${filenameDescription(description) || "Description"}.pdf`;
-  const saveDetailsValid = usesPaperless ? !!draft?.type : !!draft?.created && !!description;
+  const generatedFilename = usesPaperless
+    ? "document.pdf"
+    : `${draft?.created || "YYYY-MM-DD"} ${filenameDescription(description) || "Description"}.pdf`;
+  const saveDetailsValid = usesPaperless
+    ? !!draft?.type
+    : !!draft?.created && !!description;
   const currentJob = draft?.jobId
     ? jobs.find((j) => j.id === draft.jobId)
     : undefined;
@@ -840,93 +977,184 @@ function App() {
               </button>
             </div>
           </section>
-          <details className="drafts" open={list.length > 0}>
-          <summary>Drafts <span>{list.length}</span></summary>
-          <div className="section-title">
-            <small>
-              {(storage / 1024 / 1024).toFixed(1)} MB on this device
-            </small>
-          </div>
-          <div className="draft-grid">
-            {list.map((item) => (
-              <article className="draft-card" key={item.id}>
-                <div className="draft-symbol">
-                  <Icon name="file" />
-                </div>
-                <h3>{item.note || "Untitled document"}</h3>
-                <p>
-                  {item.pages.length}{" "}
-                  {item.pages.length === 1 ? "page" : "pages"}
-                </p>
-                <div>
+          <details className="drafts" open={unfinished.length > 0}>
+            <summary>
+              Drafts <span>{unfinished.length}</span>
+            </summary>
+            <div className="section-title">
+              <small>
+                {(storage / 1024 / 1024).toFixed(1)} MB on this device
+              </small>
+            </div>
+            <div className="draft-grid">
+              {unfinished.map((item) => (
+                <article className="draft-card" key={item.id}>
+                  <div className="draft-symbol">
+                    <Icon name="file" />
+                  </div>
+                  <h3>{item.note || "Untitled document"}</h3>
+                  <p>
+                    {item.pages.length}{" "}
+                    {item.pages.length === 1 ? "page" : "pages"}
+                  </p>
+                  <div>
+                    <button
+                      onClick={() => {
+                        setDraft(item);
+                        setSelected(0);
+                        setStep(item.pages.length ? 2 : 1);
+                        setPreview("");
+                      }}
+                    >
+                      Continue <Icon name="arrow" />
+                    </button>
+                    <button
+                      aria-label="Delete draft"
+                      onClick={() => void perform(() => discard(item))}
+                    >
+                      <Icon name="trash" />
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+            {!unfinished.length && (
+              <div className="empty-drafts">No drafts.</div>
+            )}
+          </details>
+          <details
+            className="history"
+            open={historyOpen}
+            onToggle={(e) => setHistoryOpen(e.currentTarget.open)}
+          >
+            <summary>History</summary>
+            {!!history.length && (
+              <button
+                className="delete-all"
+                disabled={
+                  !online ||
+                  busy ||
+                  history.some((item) => item.jobs.some(activeDelivery))
+                }
+                onClick={() => void perform(() => deleteHistory())}
+              >
+                Delete all
+              </button>
+            )}
+            {history.map((item) => (
+              <article className="history-document" key={item.id}>
+                <h3>
+                  {item.jobs[0]?.archive?.filename ||
+                    item.jobs[0]?.filename ||
+                    item.description ||
+                    "Document"}
+                </h3>
+                {item.jobs.map((job) => (
+                  <div className="history-row" key={job.id}>
+                    <span>
+                      {destinations.find((d) => d.id === job.destination)
+                        ?.name || job.destination}{" "}
+                      ·{" "}
+                      {job.status === "ready"
+                        ? "PDF created"
+                        : job.status === "delivered"
+                          ? "Delivered"
+                          : jobStatus(job)}
+                    </span>
+                    {job.download && (
+                      <a href={job.download} download>
+                        Download PDF
+                      </a>
+                    )}
+                    {destinations.find((d) => d.id === job.destination)
+                      ?.kind === "paperless" &&
+                      job.location?.startsWith("https://") && (
+                        <a href={job.location} target="_blank" rel="noreferrer">
+                          Open document ↗
+                        </a>
+                      )}
+                    {job.error && <small>{job.error}</small>}
+                    {["failed", "uncertain"].includes(job.status) && (
+                      <button
+                        onClick={() =>
+                          void perform(async () => {
+                            await api(`/jobs/${job.id}/retry`, {
+                              method: "POST",
+                            });
+                            setHistory(await api("/history"));
+                          })
+                        }
+                      >
+                        {job.status === "uncertain"
+                          ? "Reconcile delivery"
+                          : "Retry delivery"}
+                      </button>
+                    )}
+                  </div>
+                ))}
+                <div className="history-actions">
                   <button
-                    onClick={() => {
-                      setDraft(item);
-                      setSelected(0);
-                    }}
+                    disabled={
+                      !online ||
+                      busy ||
+                      !item.available ||
+                      item.jobs.some(activeDelivery)
+                    }
+                    onClick={() => void perform(() => exportHistory(item))}
                   >
-                    Continue <Icon name="arrow" />
+                    Export again
                   </button>
                   <button
-                    aria-label="Delete draft"
-                    onClick={() => void perform(() => discard(item))}
+                    aria-label="Delete history item"
+                    disabled={!online || busy || item.jobs.some(activeDelivery)}
+                    onClick={() => void perform(() => deleteHistory(item))}
                   >
-                    <Icon name="trash" />
+                    <Icon name="trash" /> Delete
                   </button>
                 </div>
+                {!item.available && (
+                  <small>Sources were removed by the earlier version.</small>
+                )}
               </article>
             ))}
-          </div>
-          {!list.length && (
-            <div className="empty-drafts">No drafts.</div>
-          )}
-          </details>
-          <details className="history">
-            <summary>History</summary>
-            {jobs.length ? (
-              jobs.map((job) => (
-                <div className="history-row" key={job.id}>
-                  <Icon name={job.status === "delivered" ? "check" : "file"} />
-                  <span>
-                    <small>
-                      {job.archive?.filename || job.filename} ·{" "}
-                      {destinations.find((d) => d.id === job.destination)
-                        ?.name || job.destination}
-                    </small>
-                    {job.status === "delivered"
-                      ? "Delivered"
-                      : job.status === "ready"
-                        ? "PDF ready"
-                        : jobStatus(job)}
-                  </span>
-                  {job.location?.startsWith("https://") && (
-                    <a href={job.location} target="_blank" rel="noreferrer">
-                      Open document ↗
-                    </a>
-                  )}
-                  {job.error && <small>{job.error}</small>}
-                </div>
-              ))
-            ) : (
-              <p>No deliveries yet.</p>
-            )}
+            {!history.length && <p>No documents yet.</p>}
           </details>
         </main>
       ) : (
-        <main className="workspace">
+        <main className={`workspace step-${step}`}>
           <div className="workspace-title">
             <div>
-              <button className="back" onClick={() => setDraft(null)}>
+              <button
+                className="back"
+                onClick={() => {
+                  latest.current = null;
+                  setDraft(null);
+                }}
+              >
                 ← All documents
               </button>
-              <h1>New document</h1>
+              <h1>
+                {["Add pages", "Review pages", "Save document"][step - 1]}
+              </h1>
             </div>
             <span className="saved">
               {busy ? "Working…" : "Saved on this device"}
             </span>
           </div>
+          <nav className="step-navigation" aria-label="Document steps">
+            {([1, 2, 3] as const).map((value) => (
+              <button
+                key={value}
+                aria-current={step === value ? "step" : undefined}
+                disabled={locked || (value > 1 && !draft.pages.length)}
+                onClick={() => setStep(value)}
+              >
+                {value} · {["Pages", "Review", "Save"][value - 1]}
+              </button>
+            ))}
+          </nav>
           <div className="editor-layout">
-            <aside className="pages">
+            <aside className="pages" hidden={step !== 1}>
               <div className="section-title">
                 <h2>Pages</h2>
                 <small>{draft.pages.length}/20</small>
@@ -940,6 +1168,7 @@ function App() {
                     onClick={() => {
                       setSelected(i);
                       setPreview("");
+                      setStep(2);
                     }}
                   >
                     <Icon name="file" />
@@ -1004,6 +1233,7 @@ function App() {
               </button>
             </aside>
             <section
+              hidden={step !== 2}
               className="scan-panel"
               onDragOver={(e) => e.preventDefault()}
               onDrop={(e) => {
@@ -1045,7 +1275,7 @@ function App() {
                         className="corner-editor"
                         style={{
                           aspectRatio: `${page.width}/${page.height}`,
-                          width: `min(100%, ${(65 * page.width) / page.height}vh)`,
+                          width: `min(100%, calc(var(--review-image-height) * ${page.width / page.height}))`,
                         }}
                       >
                         <img
@@ -1182,7 +1412,26 @@ function App() {
                       </div>
                     )}
                   </div>
-                  <div className="review-actions">
+                  <div
+                    className="view-modes"
+                    role="group"
+                    aria-label="Image mode"
+                  >
+                    <button
+                      aria-pressed={!preview}
+                      onClick={() => setPreview("")}
+                    >
+                      Adjust
+                    </button>
+                    <button
+                      aria-pressed={!!preview}
+                      disabled={!online || busy}
+                      onClick={() => void perform(showPreview)}
+                    >
+                      Preview
+                    </button>
+                  </div>
+                  <div className="review-actions" hidden={!!preview}>
                     <label>
                       Appearance
                       <select
@@ -1227,18 +1476,6 @@ function App() {
                     >
                       Reset
                     </button>
-                    <button
-                      disabled={!online || busy}
-                      className="primary"
-                      onClick={() => void perform(showPreview)}
-                    >
-                      Preview <Icon name="arrow" />
-                    </button>
-                    {preview && (
-                      <button onClick={() => setPreview("")}>
-                        Edit corners
-                      </button>
-                    )}
                   </div>
                 </>
               ) : (
@@ -1253,27 +1490,47 @@ function App() {
                 </div>
               )}
             </section>
-            <aside className="document-details">
+            <aside className="document-details" hidden={step !== 3}>
               <h2>Save</h2>
               <fieldset disabled={locked || busy}>
                 <label>
                   Destination
-                  <select value={draft.destination} onChange={(e) => modify({ destination: e.target.value })}>
-                    {destinations.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+                  <select
+                    value={draft.destination}
+                    onChange={(e) => modify({ destination: e.target.value })}
+                  >
+                    {destinations.map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.name}
+                      </option>
+                    ))}
                   </select>
                 </label>
                 {usesPaperless ? (
                   <label>
                     Document type
-                    <select required value={draft.type} onChange={(e) => modify({ type: e.target.value })}>
+                    <select
+                      required
+                      value={draft.type}
+                      onChange={(e) => modify({ type: e.target.value })}
+                    >
                       <option value="">Choose a type</option>
-                      {types.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                      {types.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.name}
+                        </option>
+                      ))}
                     </select>
                   </label>
                 ) : (
                   <label>
                     Document date
-                    <input type="date" required value={draft.created || ""} onChange={(e) => modify({ created: e.target.value })} />
+                    <input
+                      type="date"
+                      required
+                      value={draft.created || ""}
+                      onChange={(e) => modify({ created: e.target.value })}
+                    />
                   </label>
                 )}
                 <label>
@@ -1282,45 +1539,51 @@ function App() {
                     aria-label="Description"
                     required={!usesPaperless}
                     maxLength={128}
-                    placeholder={!usesPaperless || types.find((t) => String(t.id) === draft.type)?.name === "Receipt"
-                      ? "What did you buy? e.g. Extension cables"
-                      : types.find((t) => String(t.id) === draft.type)?.name === "Invoice"
-                        ? "What is this invoice for?"
-                        : "Brief description"}
+                    placeholder={
+                      !usesPaperless ||
+                      types.find((t) => String(t.id) === draft.type)?.name ===
+                        "Receipt"
+                        ? "What did you buy? e.g. Extension cables"
+                        : types.find((t) => String(t.id) === draft.type)
+                              ?.name === "Invoice"
+                          ? "What is this invoice for?"
+                          : "Brief description"
+                    }
                     value={draft.note}
                     onChange={(e) => modify({ note: e.target.value })}
                   />
                 </label>
-                {!usesPaperless && <small className="export-filename">{generatedFilename}</small>}
+                {!usesPaperless && (
+                  <small className="export-filename">{generatedFilename}</small>
+                )}
                 <details className="export-options">
                   <summary>More options</summary>
-                  {session.admin &&
-                    usesPaperless && (
-                      <div className="new-type">
-                        <input
-                          aria-label="New document type"
-                          placeholder="New type name"
-                          value={newType}
-                          onChange={(e) => setNewType(e.target.value)}
-                        />
-                        <button
-                          disabled={!newType || !online}
-                          onClick={() =>
-                            void perform(async () => {
-                              const created = await api("/document-types", {
-                                method: "POST",
-                                body: json({ name: newType }),
-                              });
-                              setTypes([...types, created]);
-                              modify({ type: String(created.id) });
-                              setNewType("");
-                            })
-                          }
-                        >
-                          Add
-                        </button>
-                      </div>
-                    )}
+                  {session.admin && usesPaperless && (
+                    <div className="new-type">
+                      <input
+                        aria-label="New document type"
+                        placeholder="New type name"
+                        value={newType}
+                        onChange={(e) => setNewType(e.target.value)}
+                      />
+                      <button
+                        disabled={!newType || !online}
+                        onClick={() =>
+                          void perform(async () => {
+                            const created = await api("/document-types", {
+                              method: "POST",
+                              body: json({ name: newType }),
+                            });
+                            setTypes([...types, created]);
+                            modify({ type: String(created.id) });
+                            setNewType("");
+                          })
+                        }
+                      >
+                        Add
+                      </button>
+                    </div>
+                  )}
                   <label>
                     Page size
                     <select
@@ -1335,7 +1598,13 @@ function App() {
               </fieldset>
               <button
                 className="primary send"
-                disabled={!draft.pages.length || !online || busy || locked || !saveDetailsValid}
+                disabled={
+                  !draft.pages.length ||
+                  !online ||
+                  busy ||
+                  locked ||
+                  !saveDetailsValid
+                }
                 onClick={() => void perform(send)}
               >
                 {draft.destination === "download"
@@ -1355,7 +1624,9 @@ function App() {
                       ? "Your PDF is ready"
                       : jobStatus(currentJob)}
                   </strong>
-                  {currentJob.archive && <small>{currentJob.archive.filename}</small>}
+                  {currentJob.archive && (
+                    <small>{currentJob.archive.filename}</small>
+                  )}
                   {currentJob.error && <p>{currentJob.error}</p>}
                   {currentJob.download && (
                     <a
@@ -1366,15 +1637,16 @@ function App() {
                       Download PDF
                     </a>
                   )}
-                  {currentJob.location?.startsWith("https://") && (
-                    <a
-                      href={currentJob.location}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      Open document ↗
-                    </a>
-                  )}
+                  {usesPaperless &&
+                    currentJob.location?.startsWith("https://") && (
+                      <a
+                        href={currentJob.location}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Open document ↗
+                      </a>
+                    )}
                   {["failed", "uncertain"].includes(currentJob.status) && (
                     <button
                       onClick={() =>
@@ -1396,13 +1668,50 @@ function App() {
               <button
                 className="discard"
                 disabled={locked}
-                onClick={() => void perform(() => discard(draft))}
+                onClick={() =>
+                  void perform(() =>
+                    draft.archived
+                      ? deleteHistory({ id: draft.id })
+                      : discard(draft),
+                  )
+                }
               >
                 <Icon name="trash" />
-                Discard draft
+                {draft.archived ? "Delete saved document" : "Discard draft"}
               </button>
             </aside>
           </div>
+          {step < 3 && (
+            <div className="step-footer">
+              {step === 2 && (
+                <button onClick={() => setStep(1)}>Add / arrange pages</button>
+              )}
+              {step === 2 && draft.pages.length > 1 && (
+                <select
+                  aria-label="Review page"
+                  value={selected}
+                  onChange={(e) => {
+                    setSelected(Number(e.target.value));
+                    setPreview("");
+                  }}
+                >
+                  {draft.pages.map((p, i) => (
+                    <option key={p.id} value={i}>
+                      Page {i + 1}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <button
+                className="primary"
+                disabled={!draft.pages.length || locked}
+                onClick={() => setStep(step === 1 ? 2 : 3)}
+              >
+                {step === 1 ? "Review pages" : "Continue to save"}{" "}
+                <Icon name="arrow" />
+              </button>
+            </div>
+          )}
         </main>
       )}
       {settings && (
