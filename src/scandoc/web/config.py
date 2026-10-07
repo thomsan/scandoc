@@ -47,5 +47,7 @@ class Settings(BaseSettings):
             result["paperless"] = {"id": "paperless", "name": "Paperless", "kind": "paperless", "readonly": True}
         if self.config_file:
             for destination in json.loads(self.config_file.read_text()).get("destinations", []):
+                if destination.get('kind') == 'webdav':
+                    raise ValueError('Configure WebDAV connections per user, not in shared configuration')
                 result[destination["id"]] = {**destination, "readonly": True}
         return result

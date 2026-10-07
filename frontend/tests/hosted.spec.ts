@@ -27,38 +27,52 @@ async function login(page: any, user = "scanner-team") {
 }
 async function configure(page: any) {
   const identity = await (await page.request.get("/api/v1/session")).json();
+  const headers = {
+    "X-CSRF-Token": identity.csrf,
+    Origin: process.env.SCANDOC_TEST_URL!,
+  };
   for (const [id, value] of Object.entries({
     "browser-folder": {
       kind: "folder",
       name: "Browser folder",
       root: "/app/output",
     },
-    "browser-cloud": {
-      kind: "webdav",
-      name: "Browser cloud",
-      url: "https://gateway/cloud/remote.php/dav/files/archive",
-      username: "archive",
-      password: credentials.TEST_WEBDAV_PASSWORD,
-    },
     "browser-unavailable": {
-      kind: "webdav",
-      name: "Unavailable cloud",
-      url: "https://unavailable.invalid/collection",
-      username: "archive",
-      password: "disposable",
+      kind: "folder",
+      name: "Unavailable folder",
+      root: "/proc/scandoc-browser-readonly",
     },
   })) {
     const result = await page.request.put("/api/v1/admin/destinations/" + id, {
       data: value,
-      headers: {
-        "X-CSRF-Token": identity.csrf,
-        Origin: process.env.SCANDOC_TEST_URL!,
-      },
+      headers,
     });
     expect(result.ok()).toBeTruthy();
   }
+  const connected = await page.request.post("/api/v1/webdav/accounts", {
+    data: {
+      url: "https://gateway/cloud",
+      username: "scanner-admin",
+      password: credentials.TEST_ADMIN_PASSWORD,
+      name: "My cloud",
+    },
+    headers,
+  });
+  expect(connected.ok()).toBeTruthy();
+  const account = (await connected.json()).id;
+  const selected = await page.request.post(
+    `/api/v1/webdav/accounts/${account}/destinations`,
+    {
+      data: { path: "/", name: "Browser cloud" },
+      headers,
+    },
+  );
+  expect(selected.ok()).toBeTruthy();
+  const destination = (await selected.json()).id;
   await page.reload();
+  return destination;
 }
+
 for (const destination of [
   "download",
   "browser-folder",
@@ -71,7 +85,7 @@ for (const destination of [
   }) => {
     test.setTimeout(240000);
     await login(page, "admin");
-    await configure(page);
+    const cloudDestination = await configure(page);
     await page
       .getByRole("button", { name: "New document", exact: true })
       .click();
@@ -100,7 +114,9 @@ for (const destination of [
     await page.getByLabel("Description", { exact: true }).fill(description);
     await page
       .getByRole("combobox", { name: "Destination", exact: true })
-      .selectOption(destination);
+      .selectOption(
+        destination === "browser-cloud" ? cloudDestination : destination,
+      );
     if (destination === "paperless") {
       await expect(
         page.getByLabel("Document date", { exact: true }),
@@ -265,4 +281,192 @@ test("failed destination retains draft and expired session prompts login", async
   await expect(page.getByLabel("Username", { exact: true })).toBeVisible({
     timeout: 10000,
   });
+});
+
+test("ordinary user connects personal WebDAV, browses folders, uploads and signs in again after logout", async ({
+  page,
+}) => {
+  test.setTimeout(180000);
+  await login(page);
+  const folder = `Scandoc personal ${test.info().project.name} ${Date.now()}`;
+  const providerRoot = "/cloud/remote.php/dav/files/scanner-team/";
+  const providerHeaders = {
+    Authorization:
+      "Basic " +
+      Buffer.from(`scanner-team:${credentials.TEST_TEAM_PASSWORD}`).toString(
+        "base64",
+      ),
+  };
+  const createdFolder = await page.request.fetch(
+    providerRoot + encodeURIComponent(folder),
+    { method: "MKCOL", headers: providerHeaders },
+  );
+  expect(createdFolder.ok()).toBeTruthy();
+  try {
+    await page
+      .getByRole("button", { name: "Destination settings", exact: true })
+      .click();
+    await expect(page.getByLabel("Identifier", { exact: true })).toHaveCount(0);
+    await page
+      .getByLabel("Server URL", { exact: true })
+      .fill("https://gateway/cloud");
+    const username = page.getByLabel("WebDAV username", { exact: true });
+    const password = page.getByLabel("App password", { exact: true });
+    await expect(username).toHaveAttribute(
+      "autocomplete",
+      "section-webdav username",
+    );
+    await expect(password).toHaveAttribute(
+      "autocomplete",
+      "section-webdav current-password",
+    );
+    await username.fill("scanner-team");
+    await password.fill(credentials.TEST_TEAM_PASSWORD);
+    const connectionResponse = page.waitForResponse(
+      (r) =>
+        r.url().endsWith("/webdav/accounts") && r.request().method() === "POST",
+    );
+    await page
+      .getByRole("button", { name: "Sign in to WebDAV", exact: true })
+      .click();
+    const connection = await (await connectionResponse).json();
+    expect(connection.connected).toBe(true);
+    expect(connection.password).toBeUndefined();
+    await expect(
+      page.getByRole("heading", { name: "Choose upload folder", exact: true }),
+    ).toBeVisible();
+    await page
+      .locator(".folder-list")
+      .getByRole("button", { name: folder, exact: true })
+      .click();
+    await expect(page.getByLabel("Current folder")).toHaveText(`/${folder}/`);
+    await page
+      .getByRole("button", { name: "Parent folder", exact: true })
+      .click();
+    await expect(page.getByLabel("Current folder")).toHaveText("/");
+    await page
+      .locator(".folder-list")
+      .getByRole("button", { name: folder, exact: true })
+      .click();
+    const destinationName = `Personal cloud ${test.info().project.name} ${Date.now()}`;
+    await page
+      .getByLabel("Destination name", { exact: true })
+      .fill(destinationName);
+    await page.getByLabel("Use as my default destination").check();
+    const selected = page.waitForResponse(
+      (r) =>
+        r.url().endsWith("/destinations") && r.request().method() === "POST",
+    );
+    await page
+      .getByRole("button", { name: "Use this folder", exact: true })
+      .click();
+    const destination = await (await selected).json();
+    await expect(
+      page.getByRole("dialog", { name: "Destination settings" }),
+    ).toHaveCount(0);
+    await expect
+      .poll(
+        async () =>
+          (await (await page.request.get("/api/v1/destinations")).json())[0].id,
+      )
+      .toBe(destination.id);
+    await page
+      .getByRole("button", { name: "New document", exact: true })
+      .click();
+    await page
+      .locator("input[type=file]")
+      .first()
+      .setInputFiles(resolve("../tests/fixtures/receipt.png"));
+    await page.getByRole("button", { name: "3 · Save", exact: true }).click();
+    await expect(
+      page.getByRole("combobox", { name: "Destination", exact: true }),
+    ).toHaveValue(destination.id);
+    const description = `Personal upload ${Date.now()}`;
+    await page.getByLabel("Description", { exact: true }).fill(description);
+    await page.getByLabel("Document date", { exact: true }).fill("2026-10-07");
+    await page
+      .getByRole("button", { name: "Save document", exact: true })
+      .click();
+    const history = page
+      .locator(".history-document")
+      .filter({ hasText: description });
+    await expect(history).toBeVisible({ timeout: 30000 });
+    await expect(history).toContainText("Delivered");
+    const remote = await page.request.get(
+      providerRoot +
+        encodeURIComponent(folder) +
+        "/" +
+        encodeURIComponent(`2026-10-07 ${description}.pdf`),
+      { headers: providerHeaders },
+    );
+    expect(remote.ok()).toBeTruthy();
+    expect((await remote.body()).subarray(0, 4).toString()).toBe("%PDF");
+    const saved = await page.evaluate(async () => {
+      const db = await new Promise<IDBDatabase>((resolve) => {
+        const r = indexedDB.open("scandoc");
+        r.onsuccess = () => resolve(r.result);
+      });
+      const values = await Promise.all(
+        Array.from(db.objectStoreNames).map(
+          (name) =>
+            new Promise((resolve) => {
+              const r = db.transaction(name).objectStore(name).getAll();
+              r.onsuccess = () => resolve(r.result);
+            }),
+        ),
+      );
+      db.close();
+      return JSON.stringify({
+        local: { ...localStorage },
+        session: { ...sessionStorage },
+        values,
+      });
+    });
+    expect(saved.includes(credentials.TEST_TEAM_PASSWORD)).toBe(false);
+    await page.getByRole("button", { name: /Sign out/ }).click();
+    await login(page);
+    const connections = await (
+      await page.request.get("/api/v1/webdav/accounts")
+    ).json();
+    expect(connections.find((a: any) => a.id === connection.id).connected).toBe(
+      false,
+    );
+    await page
+      .getByRole("button", { name: "Destination settings", exact: true })
+      .click();
+    const accountCard = page
+      .locator(".webdav-connection")
+      .filter({ hasText: connection.url });
+    await accountCard
+      .getByRole("button", { name: "Sign in", exact: true })
+      .click();
+    await accountCard
+      .getByLabel("App password", { exact: true })
+      .fill(credentials.TEST_TEAM_PASSWORD);
+    await accountCard
+      .getByRole("button", { name: "Sign in to WebDAV", exact: true })
+      .click();
+    await expect(accountCard).toContainText("Signed in for this session");
+    await expect(
+      accountCard.getByRole("button", { name: "Choose folder", exact: true }),
+    ).toBeEnabled();
+    await page
+      .getByRole("button", { name: "Close settings", exact: true })
+      .click();
+    const session = await (await page.request.get("/api/v1/session")).json();
+    const deleted = await page.request.delete(
+      `/api/v1/webdav/accounts/${connection.id}`,
+      {
+        headers: {
+          "X-CSRF-Token": session.csrf,
+          Origin: process.env.SCANDOC_TEST_URL!,
+        },
+      },
+    );
+    expect(deleted.ok()).toBeTruthy();
+  } finally {
+    await page.request.delete(providerRoot + encodeURIComponent(folder), {
+      headers: providerHeaders,
+    });
+  }
 });

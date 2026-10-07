@@ -92,7 +92,8 @@ def deliver_folder(destination, pdf, filename):
 
 def deliver_webdav(settings, destination, pdf, filename):
     url = destination["url"].rstrip("/") + "/" + quote(filename)
-    with client(settings) as connection:
+    from .webdav import webdav_client
+    with webdav_client(settings) as connection:
         connection.auth = (destination.get("username", ""), destination.get("password", ""))
         expected = file_digest(pdf)
         existing = remote_digest(connection, url)

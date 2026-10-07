@@ -25,9 +25,11 @@ def process(store, row, processing_slot=None):
         raise ValueError("Draft no longer exists")
     directory = settings.data_dir / "drafts" / draft["id"]
     pdf = directory / (row["id"] + ".pdf")
-    destination = store.destinations().get(value["destination"])
+    destination = store.destinations(row["owner"], value.get("webdav_session")).get(value["destination"])
     if not destination:
         raise ValueError("Destination no longer exists")
+    if destination['kind'] == 'webdav' and not destination.get('connected'):
+        raise ValueError('WebDAV session ended; sign in again and retry. Your document is retained.')
     credential = store.decrypt(value["credential"])
     token = credential.get("token")
     if destination["kind"] == "paperless" and not value.get("task_id") and not value.get("document_id") and row["status"] != "uncertain":
@@ -159,8 +161,8 @@ def process(store, row, processing_slot=None):
     store.mark_archived(draft['id'], row['owner'])
 
 
-def run(settings, stop, processing_slot=None):
-    store = Store(settings)
+def run(settings, stop, processing_slot=None, webdav_secrets=None):
+    store = Store(settings, webdav_secrets)
     # No writer is active before this instance's sole worker starts. Discard
     # interrupted temporary PDFs; committed PDFs and source pages remain intact.
     for pattern in ("*/*.pending", "*/.*.pending.*.tmp"):
@@ -185,7 +187,7 @@ def run(settings, stop, processing_slot=None):
                 value = store.job(row["id"], row["owner"])
                 value.pop("status", None)
                 value.pop("id", None)
-                uncertain = isinstance(exc, UncertainDelivery) or bool(value.get("submission_started") and not value.get("task_id") and not value.get("ingestion_failed"))
+                uncertain = row["status"] == "uncertain" or isinstance(exc, UncertainDelivery) or bool(value.get("submission_started") and not value.get("task_id") and not value.get("ingestion_failed"))
                 pending_error = isinstance(exc, httpx.TransportError) or (isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code >= 500)
                 if pending_error and value.get("task_id"):
                     update(store, row["id"], "waiting", value)
@@ -201,9 +203,9 @@ def run(settings, stop, processing_slot=None):
         stop.wait(1)
 
 
-def start(settings, processing_slot=None):
+def start(settings, processing_slot=None, webdav_secrets=None):
     context = multiprocessing.get_context("spawn")
     stop = context.Event()
-    process = context.Process(target=run, args=(settings, stop, processing_slot), daemon=True)
+    process = context.Process(target=run, args=(settings, stop, processing_slot, webdav_secrets), daemon=True)
     process.start()
     return process, stop
