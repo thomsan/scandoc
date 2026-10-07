@@ -117,14 +117,11 @@ def test_folder_delivery_retains_sources_download_and_repeated_request(applicati
     assert client.post('/api/v1/drafts',json={'id':draft}).status_code == 409
 
 
-def test_secrets_redacted_encrypted_and_readonly(application,client):
-    destination={'kind':'webdav','name':'Cloud','url':'https://cloud.test/collection','username':'team','password':'very-secret'}
-    assert client.put('/api/v1/admin/destinations/cloud',json=destination).status_code==200
-    assert 'very-secret' not in client.get('/api/v1/destinations').text
-    assert 'very-secret' not in client.get('/api/v1/admin/destinations').text
-    assert b'very-secret' not in application.state.store.path.read_bytes()
+def test_shared_webdav_configuration_is_rejected(application,client):
+    destination={'kind':'webdav','name':'Cloud','url':'https://cloud.test/collection','username':'team','password':'example-secret'}
+    assert client.put('/api/v1/admin/destinations/cloud',json=destination).status_code==422
+    assert all(d['kind'] != 'webdav' for d in client.get('/api/v1/destinations').json())
     assert client.put('/api/v1/admin/destinations/download',json=destination).status_code==409
-    assert client.put('/api/v1/admin/destinations/cloud',json={**destination,'url':'http://cloud.test/'}).status_code==422
 
 
 def test_limits_malformed_and_host_protection(application,client):

@@ -16,6 +16,8 @@ type Destination = {
   name: string;
   kind: string;
   readonly?: boolean;
+  personal?: boolean;
+  connected?: boolean;
   default?: boolean;
   root?: string;
   url?: string;
@@ -194,7 +196,9 @@ function App() {
   async function refresh(current: Session) {
     const revision = authRevision;
     const active = () =>
-      revision === authRevision && !localStorage.getItem("scandoc-signed-out");
+      revision === authRevision &&
+      localStorage.getItem("scandoc-owner") === current.owner &&
+      !localStorage.getItem("scandoc-signed-out");
     const cached = await db.account(current.owner);
     if (!active()) return;
     if (cached) {
@@ -828,9 +832,12 @@ function App() {
   const generatedFilename = usesPaperless
     ? "document.pdf"
     : `${draft?.created || "YYYY-MM-DD"} ${filenameDescription(description) || "Description"}.pdf`;
-  const saveDetailsValid = usesPaperless
-    ? !!draft?.type
-    : !!draft?.created && !!description;
+  const destination = destinations.find((d) => d.id === draft?.destination);
+  const webdavLoginRequired =
+    destination?.kind === "webdav" && !destination.connected;
+  const saveDetailsValid =
+    !webdavLoginRequired &&
+    (usesPaperless ? !!draft?.type : !!draft?.created && !!description);
   const currentJob = draft?.jobId
     ? jobs.find((j) => j.id === draft.jobId)
     : undefined;
@@ -916,14 +923,14 @@ function App() {
           <span className={online ? "connection" : "connection offline"}>
             {online ? "Connected" : "Offline · drafts saved"}
           </span>
-          {session.admin && (
+          {
             <button
               aria-label="Destination settings"
               onClick={() => setSettings(true)}
             >
               <Icon name="settings" />
             </button>
-          )}
+          }
           <button
             disabled={session.owner === "local"}
             onClick={() =>
@@ -1502,10 +1509,16 @@ function App() {
                     {destinations.map((d) => (
                       <option key={d.id} value={d.id}>
                         {d.name}
+                        {d.kind === "webdav" && !d.connected
+                          ? " · Sign in"
+                          : ""}
                       </option>
                     ))}
                   </select>
                 </label>
+                <button type="button" onClick={() => setSettings(true)}>
+                  {webdavLoginRequired ? "Sign in to WebDAV" : "Connect WebDAV"}
+                </button>
                 {usesPaperless ? (
                   <label>
                     Document type
@@ -1716,9 +1729,14 @@ function App() {
       )}
       {settings && (
         <SettingsDialog
-          close={() => {
-            setSettings(false);
-            void refresh(session);
+          administrator={session.admin}
+          close={(destinationId?: string) => {
+            if (destinationId && latest.current)
+              modify({ destination: destinationId });
+            void perform(async () => {
+              await refresh(session);
+              setSettings(false);
+            });
           }}
         />
       )}
@@ -1726,7 +1744,351 @@ function App() {
   );
 }
 
-function SettingsDialog({ close }: { close: () => void }) {
+type WebDAVAccount = {
+  id: string;
+  name: string;
+  url: string;
+  username: string;
+  connected: boolean;
+};
+type FolderListing = {
+  path: string;
+  folders: { name: string; path: string }[];
+};
+function PersonalWebDAVSettings({ saved }: { saved: (id: string) => void }) {
+  const [accounts, setAccounts] = useState<WebDAVAccount[]>([]);
+  const [destinations, setDestinations] = useState<Destination[]>([]);
+  const [account, setAccount] = useState<WebDAVAccount | null>(null);
+  const [listing, setListing] = useState<FolderListing | null>(null);
+  const [server, setServer] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [name, setName] = useState("");
+  const [defaultDestination, setDefaultDestination] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [rotating, setRotating] = useState<string | null>(null);
+  const [replacement, setReplacement] = useState("");
+  const [message, setMessage] = useState("");
+  async function refreshConnections() {
+    const [connections, entries] = await Promise.all([
+      api("/webdav/accounts"),
+      api("/destinations"),
+    ]);
+    setAccounts(connections);
+    setDestinations(entries.filter((d: Destination) => d.personal));
+  }
+  useEffect(() => {
+    void refreshConnections().catch((e) => setError(e.message));
+  }, []);
+  async function act(action: () => Promise<void>) {
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      await action();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function browse(connection: WebDAVAccount, path = "/") {
+    const folders = await api(
+      `/webdav/accounts/${connection.id}/folders?path=${encodeURIComponent(path)}`,
+    );
+    setAccount(connection);
+    setListing(folders);
+    setName(
+      path === "/"
+        ? connection.name
+        : `${connection.name} · ${path.split("/").filter(Boolean).at(-1)}`,
+    );
+  }
+  return (
+    <section className="personal-webdav" aria-label="Your WebDAV connections">
+      <h3>Your WebDAV</h3>
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+      {message && <p role="status">{message}</p>}
+      {destinations.map((d) => (
+        <div className="destination-row" key={d.id}>
+          <strong>{d.name}</strong>
+          <button
+            disabled={busy}
+            aria-label={`Remove destination ${d.name}`}
+            onClick={() =>
+              void act(async () => {
+                await api(`/webdav/destinations/${d.id}`, { method: "DELETE" });
+                await refreshConnections();
+              })
+            }
+          >
+            Remove
+          </button>
+        </div>
+      ))}
+      {accounts.map((a) => (
+        <div className="webdav-connection" key={a.id}>
+          <div className="destination-row">
+            <div>
+              <strong>{a.name}</strong>
+              <small>
+                {a.username} · {a.url}
+              </small>
+            </div>
+          </div>
+          <small>
+            {a.connected
+              ? "Signed in for this session"
+              : "Sign in to reconnect"}
+          </small>
+          <div className="connection-actions">
+            <button
+              disabled={busy || !a.connected}
+              onClick={() => void act(() => browse(a))}
+            >
+              Choose folder
+            </button>
+            <button
+              disabled={busy}
+              onClick={() => {
+                setRotating(a.id);
+                setReplacement("");
+              }}
+            >
+              Sign in
+            </button>
+            <button
+              disabled={busy}
+              onClick={() =>
+                void act(async () => {
+                  if (
+                    !window.confirm(
+                      "Disconnect this WebDAV account? Its saved destinations will be removed. Your documents remain.",
+                    )
+                  )
+                    return;
+                  await api(`/webdav/accounts/${a.id}`, { method: "DELETE" });
+                  if (account?.id === a.id) {
+                    setAccount(null);
+                    setListing(null);
+                  }
+                  setRotating(null);
+                  setReplacement("");
+                  await refreshConnections();
+                })
+              }
+            >
+              Disconnect
+            </button>
+          </div>
+          {rotating === a.id && (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void act(async () => {
+                  await api(`/webdav/accounts/${a.id}/password`, {
+                    method: "PUT",
+                    body: json({ password: replacement }),
+                  });
+                  setReplacement("");
+                  setRotating(null);
+                  await refreshConnections();
+                  setMessage("Signed in for this session");
+                });
+              }}
+            >
+              <label>
+                WebDAV username
+                <input
+                  name="webdav_username"
+                  autoComplete="section-webdav username"
+                  value={a.username}
+                  readOnly
+                />
+              </label>
+              <label>
+                App password
+                <input
+                  name="webdav_password"
+                  required
+                  type="password"
+                  autoComplete="section-webdav current-password"
+                  value={replacement}
+                  onChange={(e) => setReplacement(e.target.value)}
+                />
+              </label>
+              <button disabled={busy || !replacement}>Sign in to WebDAV</button>
+            </form>
+          )}
+        </div>
+      ))}
+      {account && listing ? (
+        <div className="folder-browser">
+          <h3>Choose upload folder</h3>
+          <p className="current-folder" aria-label="Current folder">
+            {listing.path}
+          </p>
+          {listing.path !== "/" && (
+            <button
+              disabled={busy}
+              onClick={() =>
+                void act(() =>
+                  browse(
+                    account,
+                    "/" +
+                      listing.path
+                        .split("/")
+                        .filter(Boolean)
+                        .slice(0, -1)
+                        .join("/"),
+                  ),
+                )
+              }
+            >
+              Parent folder
+            </button>
+          )}
+          <div className="folder-list">
+            {listing.folders.map((folder) => (
+              <button
+                key={folder.path}
+                disabled={busy}
+                onClick={() => void act(() => browse(account, folder.path))}
+              >
+                <Icon name="file" />
+                {folder.name}
+                <Icon name="arrow" />
+              </button>
+            ))}
+          </div>
+          {!listing.folders.length && <small>No subfolders</small>}
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void act(async () => {
+                const destination = await api(
+                  `/webdav/accounts/${account.id}/destinations`,
+                  {
+                    method: "POST",
+                    body: json({
+                      path: listing.path,
+                      name,
+                      default: defaultDestination,
+                    }),
+                  },
+                );
+                saved(destination.id);
+              });
+            }}
+          >
+            <label>
+              Destination name
+              <input
+                required
+                maxLength={128}
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+              />
+            </label>
+            <label className="checkbox">
+              <input
+                type="checkbox"
+                checked={defaultDestination}
+                onChange={(e) => setDefaultDestination(e.target.checked)}
+              />
+              Use as my default destination
+            </label>
+            <button className="primary" disabled={busy || !name.trim()}>
+              Use this folder
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                setAccount(null);
+                setListing(null);
+              }}
+            >
+              Cancel
+            </button>
+          </form>
+        </div>
+      ) : (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            void act(async () => {
+              const connection = await api("/webdav/accounts", {
+                method: "POST",
+                body: json({ url: server, username, password }),
+              });
+              setPassword("");
+              await refreshConnections();
+              await browse(connection);
+            });
+          }}
+        >
+          <h3>Connect a WebDAV account</h3>
+          <label>
+            Server URL
+            <input
+              required
+              type="url"
+              placeholder="https://cloud.example.com"
+              autoComplete="url"
+              value={server}
+              onChange={(e) => setServer(e.target.value)}
+            />
+          </label>
+          <label>
+            WebDAV username
+            <input
+              name="webdav_username"
+              required
+              autoComplete="section-webdav username"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+            />
+          </label>
+          <label>
+            App password
+            <input
+              name="webdav_password"
+              required
+              type="password"
+              autoComplete="section-webdav current-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          </label>
+          <small>
+            Use your own account. An app password is preferred where supported.
+            Your password manager can remember this login. Scandoc keeps the
+            password only for this session; server and folder choices stay
+            saved.
+          </small>
+          <button className="primary" disabled={busy || !navigator.onLine}>
+            Sign in to WebDAV
+          </button>
+        </form>
+      )}
+      {busy && <p role="status">Connecting…</p>}
+    </section>
+  );
+}
+
+function SettingsDialog({
+  close,
+  administrator,
+}: {
+  close: (destinationId?: string) => void;
+  administrator: boolean;
+}) {
   const [items, setItems] = useState<Destination[]>([]),
     [message, setMessage] = useState(""),
     [error, setError] = useState(""),
@@ -1737,6 +2099,7 @@ function SettingsDialog({ close }: { close: () => void }) {
       root: "",
     });
   useEffect(() => {
+    if (!administrator) return;
     void api("/admin/destinations")
       .then(setItems)
       .catch((e) => setError(e.message));
@@ -1760,162 +2123,137 @@ function SettingsDialog({ close }: { close: () => void }) {
       >
         <div className="section-title">
           <div>
-            <p className="eyebrow">ADMINISTRATION</p>
+            <p className="eyebrow">YOUR CONNECTIONS</p>
             <h2>Destination settings</h2>
           </div>
-          <button onClick={close} aria-label="Close settings">
+          <button onClick={() => close()} aria-label="Close settings">
             ×
           </button>
         </div>
-        <p>Choose where documents can go. Credentials stay on the server.</p>
-        {error && (
-          <p className="error" role="alert">
-            {error}
-          </p>
-        )}
-        {message && <p role="status">{message}</p>}
-        {items.map((d) => (
-          <div className="destination-row" key={d.id}>
-            <div>
-              <strong>{d.name}</strong>
-              <small>
-                {d.kind}
-                {d.readonly ? " · configured by operator" : ""}
-              </small>
-            </div>
-            <button
-              onClick={() =>
-                void act(async () => {
-                  await api(`/admin/destinations/${d.id}/test`, {
-                    method: "POST",
-                  });
-                  setMessage("Connection verified");
-                })
-              }
-            >
-              Test
-            </button>
-            {!d.readonly && (
-              <>
-                <button onClick={() => setEditing(d)}>Edit</button>
+        <PersonalWebDAVSettings saved={(id) => close(id)} />
+        {administrator && (
+          <div className="operator-destinations">
+            <h3>Server folders</h3>
+            {error && (
+              <p className="error" role="alert">
+                {error}
+              </p>
+            )}
+            {message && <p role="status">{message}</p>}
+            {items.map((d) => (
+              <div className="destination-row" key={d.id}>
+                <div>
+                  <strong>{d.name}</strong>
+                  <small>
+                    {d.kind}
+                    {d.readonly ? " · configured by operator" : ""}
+                  </small>
+                </div>
                 <button
-                  aria-label={`Delete ${d.name}`}
                   onClick={() =>
                     void act(async () => {
-                      await api(`/admin/destinations/${d.id}`, {
-                        method: "DELETE",
+                      await api(`/admin/destinations/${d.id}/test`, {
+                        method: "POST",
                       });
-                      setItems(await api("/admin/destinations"));
+                      setMessage("Connection verified");
                     })
                   }
                 >
-                  <Icon name="trash" />
+                  Test
                 </button>
-              </>
-            )}
-          </div>
-        ))}
-        <h3>{editing.id ? "Edit or add destination" : "Add a destination"}</h3>
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            void act(async () => {
-              await api("/admin/destinations/" + editing.id, {
-                method: "PUT",
-                body: json(editing),
-              });
-              setItems(await api("/admin/destinations"));
-              setEditing({ id: "", name: "", kind: "folder", root: "" });
-              setMessage("Destination saved");
-            });
-          }}
-        >
-          <label>
-            Identifier
-            <input
-              required
-              pattern="[a-zA-Z0-9_-]+"
-              value={editing.id}
-              onChange={(e) => setEditing({ ...editing, id: e.target.value })}
-            />
-          </label>
-          <label>
-            Display name
-            <input
-              required
-              value={editing.name}
-              onChange={(e) => setEditing({ ...editing, name: e.target.value })}
-            />
-          </label>
-          <label>
-            Destination type
-            <select
-              value={editing.kind}
-              onChange={(e) => setEditing({ ...editing, kind: e.target.value })}
+                {!d.readonly && (
+                  <>
+                    <button onClick={() => setEditing(d)}>Edit</button>
+                    <button
+                      aria-label={`Delete ${d.name}`}
+                      onClick={() =>
+                        void act(async () => {
+                          await api(`/admin/destinations/${d.id}`, {
+                            method: "DELETE",
+                          });
+                          setItems(await api("/admin/destinations"));
+                        })
+                      }
+                    >
+                      <Icon name="trash" />
+                    </button>
+                  </>
+                )}
+              </div>
+            ))}
+            <h3>
+              {editing.id ? "Edit or add destination" : "Add a destination"}
+            </h3>
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void act(async () => {
+                  await api("/admin/destinations/" + editing.id, {
+                    method: "PUT",
+                    body: json(editing),
+                  });
+                  setItems(await api("/admin/destinations"));
+                  setEditing({ id: "", name: "", kind: "folder", root: "" });
+                  setMessage("Destination saved");
+                });
+              }}
             >
-              <option value="folder">Server folder</option>
-              <option value="webdav">ownCloud / WebDAV</option>
-            </select>
-          </label>
-          {editing.kind === "folder" ? (
-            <label>
-              Absolute folder path
-              <input
-                required
-                value={editing.root || ""}
-                onChange={(e) =>
-                  setEditing({ ...editing, root: e.target.value })
-                }
-              />
-            </label>
-          ) : (
-            <>
               <label>
-                HTTPS collection URL
+                Identifier
                 <input
-                  type="url"
                   required
-                  value={editing.url || ""}
+                  pattern="[a-zA-Z0-9_-]+"
+                  value={editing.id}
                   onChange={(e) =>
-                    setEditing({ ...editing, url: e.target.value })
+                    setEditing({ ...editing, id: e.target.value })
                   }
                 />
               </label>
               <label>
-                Username
+                Display name
                 <input
-                  value={editing.username || ""}
+                  required
+                  value={editing.name}
                   onChange={(e) =>
-                    setEditing({ ...editing, username: e.target.value })
+                    setEditing({ ...editing, name: e.target.value })
                   }
                 />
               </label>
               <label>
-                App password
-                <input
-                  type="password"
-                  autoComplete="new-password"
-                  value={editing.password || ""}
-                  placeholder="Leave blank to keep existing password"
+                Destination type
+                <select
+                  value={editing.kind}
                   onChange={(e) =>
-                    setEditing({ ...editing, password: e.target.value })
+                    setEditing({ ...editing, kind: e.target.value })
+                  }
+                >
+                  <option value="folder">Server folder</option>
+                </select>
+              </label>
+              <label>
+                Absolute folder path
+                <input
+                  required
+                  value={editing.root || ""}
+                  onChange={(e) =>
+                    setEditing({ ...editing, root: e.target.value })
                   }
                 />
               </label>
-            </>
-          )}
-          <label className="checkbox">
-            <input
-              type="checkbox"
-              checked={!!editing.default}
-              onChange={(e) =>
-                setEditing({ ...editing, default: e.target.checked })
-              }
-            />
-            Use as default destination
-          </label>
-          <button className="primary">Save destination</button>
-        </form>
+              <label className="checkbox">
+                <input
+                  type="checkbox"
+                  checked={!!editing.default}
+                  onChange={(e) =>
+                    setEditing({ ...editing, default: e.target.checked })
+                  }
+                />
+                Use as default destination
+              </label>
+              <button className="primary">Save destination</button>
+            </form>
+          </div>
+        )}
       </section>
     </div>
   );

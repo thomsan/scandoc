@@ -25,6 +25,7 @@ from ..scan import load_image, detect_corners, correct_image, validate_corners
 from .config import Settings
 from .store import Store
 from .delivery import paperless, results, validate_destination, client
+from . import webdav
 from .worker import start
 from .naming import export_filename
 
@@ -61,6 +62,23 @@ def identifier(value):
         raise HTTPException(422, "Invalid identifier")
 
 
+class WebDAVLogin(BaseModel):
+    url: str = Field(min_length=1, max_length=2048)
+    username: str = Field(min_length=1, max_length=256)
+    password: str = Field(min_length=1, max_length=4096)
+    name: str = Field(default='', max_length=64)
+
+
+class WebDAVPassword(BaseModel):
+    password: str = Field(min_length=1, max_length=4096)
+
+
+class WebDAVFolder(BaseModel):
+    path: str = Field(default='/', max_length=2048)
+    name: str = Field(min_length=1, max_length=128)
+    default: bool = False
+
+
 def create_app(settings=None):
     settings = settings or Settings()
     settings.prepare()
@@ -71,15 +89,32 @@ def create_app(settings=None):
     @asynccontextmanager
     async def lifespan(app):
         nonlocal worker
+        manager = None
+        cleaner = None
         if settings.worker_enabled:
-            worker = start(settings, processing_slot)
+            manager = multiprocessing.get_context('spawn').Manager()
+            store.webdav_secrets = manager.dict()
+            worker = start(settings, processing_slot, store.webdav_secrets)
+            async def prune_secrets():
+                while True:
+                    await run_in_threadpool(store.prune_webdav_sessions)
+                    await asyncio.sleep(5)
+            cleaner = asyncio.create_task(prune_secrets())
         yield
+        if cleaner:
+            cleaner.cancel()
+            try:
+                await cleaner
+            except asyncio.CancelledError:
+                pass
         if worker:
             worker[1].set()
             await run_in_threadpool(worker[0].join, 30)
             if worker[0].is_alive():
                 worker[0].terminate()
                 worker[0].join(5)
+        if manager:
+            manager.shutdown()
 
     app = FastAPI(title="Scandoc", version="0.2.0", lifespan=lifespan)
     app.state.store = store
@@ -112,14 +147,14 @@ def create_app(settings=None):
 
     def user(request: Request):
         if not settings.hosted:
-            return {"owner": "local", "username": "Local workspace", "admin": True, "csrf": "local"}
+            return {"owner": "local", "username": "Local workspace", "admin": True, "csrf": "local", "session_id": "local"}
         session_id = request.cookies.get("scandoc_session", "")
         session = store.session(hashlib.sha256(session_id.encode()).hexdigest())
         if not session:
             raise HTTPException(401, "Please sign in")
         if request.method not in ("GET", "HEAD") and not secrets.compare_digest(request.headers.get("x-csrf-token", ""), session["csrf"]):
             raise HTTPException(403, "Invalid CSRF token")
-        return session
+        return {**session, "session_id": hashlib.sha256(session_id.encode()).hexdigest()}
 
     def admin(current=Depends(user)):
         if not current["admin"]:
@@ -149,7 +184,7 @@ def create_app(settings=None):
         return page, settings.data_dir / "drafts" / draft["id"] / (page["id"] + ".png")
 
     def public_job(job):
-        return {k: v for k, v in job.items() if k not in ("credential", "request_hash")}
+        return {k: v for k, v in job.items() if k not in ("credential", "request_hash", "webdav_session")}
 
     @app.exception_handler(ValueError)
     async def value_error(request, exc):
@@ -206,6 +241,7 @@ def create_app(settings=None):
     def logout(request: Request, response: Response, current=Depends(user)):
         with store.connect() as db:
             db.execute("DELETE FROM sessions WHERE id=?", (hashlib.sha256(request.cookies.get("scandoc_session", "").encode()).hexdigest(),))
+        store.forget_webdav_session(current["owner"], current["session_id"])
         response.delete_cookie("scandoc_session", secure=True, httponly=True, samesite="strict")
         return {"status": "signed out"}
 
@@ -370,8 +406,11 @@ def create_app(settings=None):
         draft = draft_for(draft_id, current, True)
         if not draft["pages"]:
             raise ValueError("Add at least one page")
-        if body.destination not in store.destinations():
+        if body.destination not in store.destinations(current["owner"], current["session_id"]):
             raise ValueError("Unknown destination")
+        destination = store.destinations(current['owner'], current['session_id'])[body.destination]
+        if destination['kind'] == 'webdav' and not destination.get('connected'):
+            raise HTTPException(409, 'Sign in to your WebDAV connection before uploading')
         if body.page_size not in ("natural", "a4") or not re.fullmatch(r"[\w .()-]+\.pdf", body.filename) or body.filename.startswith("."):
             raise ValueError("Choose a safe PDF filename and page size")
         allowed = {"description", "note", "title", "created", "document_type", "tags", "correspondent"}
@@ -379,7 +418,7 @@ def create_app(settings=None):
             description = body.metadata["description"]
             if not isinstance(description, str) or len(description) > 128:
                 raise ValueError("Description must be text of at most 128 characters")
-            if store.destinations()[body.destination]["kind"] == "paperless":
+            if store.destinations(current["owner"], current["session_id"])[body.destination]["kind"] == "paperless":
                 if not body.metadata.get("document_type"):
                     raise ValueError("Choose a document type")
                 body.filename = "document.pdf"
@@ -394,7 +433,9 @@ def create_app(settings=None):
                 raise ValueError("Metadata identifiers must be positive integers")
         if body.metadata.get("tags") and (not isinstance(body.metadata["tags"], list) or any(type(t) is not int or t < 1 for t in body.metadata["tags"])):
             raise ValueError("Tags must be positive integer identifiers")
-        value = {**body.model_dump(mode="json"), "credential": store.encrypt({"token": current.get("token")}), "request_hash": request_hash}
+        value = {**body.model_dump(mode="json"), "credential": store.encrypt({"token": current.get("token") if destination["kind"] == "paperless" else None}), "request_hash": request_hash}
+        if destination['kind'] == 'webdav':
+            value['webdav_session'] = current['session_id']
         with store.connect() as db:
             try:
                 db.execute("INSERT INTO jobs VALUES(?,?,?,?,?)", (job_id, current["owner"], draft["id"], "queued", json.dumps(value)))
@@ -427,7 +468,12 @@ def create_app(settings=None):
         if value.pop("ingestion_failed", False):
             value.pop("task_id", None)
             value.pop("submission_started", None)
-        value["credential"] = store.encrypt({"token": current.get("token")})
+        destination = store.destinations(current['owner'], current['session_id']).get(value['destination'])
+        if destination and destination['kind'] == 'webdav':
+            if not destination.get('connected'):
+                raise HTTPException(409, 'Sign in to your WebDAV connection before retrying')
+            value['webdav_session'] = current['session_id']
+        value["credential"] = store.encrypt({"token": current.get("token") if destination and destination['kind'] == 'paperless' else None})
         with store.connect() as db:
             db.execute("UPDATE jobs SET status=?,value=? WHERE id=?", (status, json.dumps(value), job_id))
         return {"id": job_id, "status": status}
@@ -481,13 +527,112 @@ def create_app(settings=None):
             payload["set_permissions"] = {"view": {"groups": [group["id"]]}, "change": {"groups": [group["id"]]}}
         return paperless(settings, current["token"], "POST", "document_types/", json=payload)
 
+    def account_for(account_id, current):
+        account_id = identifier(account_id)
+        account = store.webdav_accounts(current['owner']).get(account_id)
+        if not account:
+            raise HTTPException(404, 'WebDAV connection not found')
+        return account_id, account
+
+    def public_account(account_id, account):
+        return {'id': account_id, 'name': account['name'], 'url': account['url'], 'username': account['username']}
+
+    def login_limit(current):
+        if not store.webdav_login_allowed(current['owner']):
+            raise HTTPException(429, 'Too many WebDAV login attempts; wait one minute')
+
+    @app.get('/api/v1/webdav/accounts')
+    def webdav_accounts(current=Depends(user)):
+        return [{**public_account(key, account), 'connected': bool(store.webdav_password(current['owner'], current['session_id'], key))} for key, account in store.webdav_accounts(current['owner']).items()]
+
+    @app.post('/api/v1/webdav/accounts')
+    def connect_webdav(body: WebDAVLogin, current=Depends(user)):
+        login_limit(current)
+        if len(store.webdav_accounts(current['owner'])) >= 10:
+            raise ValueError('Disconnect an unused WebDAV account before adding another')
+        account = webdav.login(settings, body.url, body.username, body.password)
+        account['name'] = body.name.strip() or urlparse(account['url']).hostname
+        password = account.pop('password')
+        account_id = next((key for key, value in store.webdav_accounts(current['owner']).items() if value['url'] == account['url'] and value['username'] == account['username']), str(uuid4()))
+        with store.connect() as db:
+            db.execute('INSERT OR REPLACE INTO webdav_accounts VALUES(?,?,?)', (account_id, current['owner'], store.encrypt(account)))
+        store.remember_webdav_session(current['owner'], current['session_id'], account_id, password)
+        return {**public_account(account_id, account), 'connected': True}
+
+    @app.put('/api/v1/webdav/accounts/{account_id}/password')
+    def update_webdav_password(account_id: str, body: WebDAVPassword, current=Depends(user)):
+        account_id, account = account_for(account_id, current)
+        login_limit(current)
+        updated = webdav.login(settings, account['url'], account['username'], body.password)
+        store.remember_webdav_session(current['owner'], current['session_id'], account_id, updated['password'])
+        return {**public_account(account_id, account), 'connected': True}
+
+    @app.get('/api/v1/webdav/accounts/{account_id}/folders')
+    def webdav_folders(account_id: str, path: str = '/', current=Depends(user)):
+        account_id, account = account_for(account_id, current)
+        password = store.webdav_password(current['owner'], current['session_id'], account_id)
+        if not password:
+            raise HTTPException(409, 'Sign in to your WebDAV connection to browse folders')
+        return webdav.browse(settings, {**account, 'password': password}, path)
+
+    @app.post('/api/v1/webdav/accounts/{account_id}/destinations')
+    def select_webdav_folder(account_id: str, body: WebDAVFolder, current=Depends(user)):
+        account_id, account = account_for(account_id, current)
+        path = webdav.clean_path(body.path)
+        password = store.webdav_password(current['owner'], current['session_id'], account_id)
+        if not password:
+            raise HTTPException(409, 'Sign in to your WebDAV connection to choose a folder')
+        webdav.browse(settings, {**account, 'password': password}, path, depth='0')
+        existing = store.personal_destinations(current['owner'])
+        destination_id = next((key for key, value in existing.items() if value['account_id'] == account_id and value['path'] == path and value['name'] == body.name.strip()), 'webdav-' + str(uuid4()))
+        if len(existing) >= 30 and destination_id not in existing:
+            raise ValueError('Remove an unused destination before adding another')
+        destination = {'id': destination_id, 'kind': 'webdav', 'name': body.name.strip(),
+                       'account_id': account_id, 'path': path, 'readonly': False, 'personal': True, 'default': body.default}
+        if not destination['name']:
+            raise ValueError('Enter a destination name')
+        with store.connect() as db:
+            if body.default:
+                for key, value in existing.items():
+                    value['default'] = False
+                    db.execute('UPDATE user_destinations SET value=? WHERE id=? AND owner=?', (store.encrypt(value), key, current['owner']))
+            db.execute('INSERT OR REPLACE INTO user_destinations VALUES(?,?,?)', (destination_id, current['owner'], store.encrypt(destination)))
+        return public_destination(destination)
+
+    def no_active_destination(db, ids, current):
+        for destination_id in ids:
+            for row in db.execute("SELECT value FROM jobs WHERE owner=? AND status IN ('queued','processing','waiting','uncertain','reconciling')", (current['owner'],)):
+                if json.loads(row['value']).get('destination') == destination_id:
+                    raise HTTPException(409, 'Finish or reconcile active uploads before disconnecting')
+
+    @app.delete('/api/v1/webdav/accounts/{account_id}')
+    def disconnect_webdav(account_id: str, current=Depends(user)):
+        account_id, _ = account_for(account_id, current)
+        ids = [key for key, value in store.personal_destinations(current['owner']).items() if value['account_id'] == account_id]
+        with store.connect() as db:
+            no_active_destination(db, ids, current)
+            for key in ids:
+                db.execute('DELETE FROM user_destinations WHERE id=? AND owner=?', (key, current['owner']))
+            db.execute('DELETE FROM webdav_accounts WHERE id=? AND owner=?', (account_id, current['owner']))
+        store.forget_webdav_session(current['owner'], account_id=account_id)
+        return {'status': 'disconnected'}
+
+    @app.delete('/api/v1/webdav/destinations/{destination_id}')
+    def delete_personal_destination(destination_id: str, current=Depends(user)):
+        if destination_id not in store.personal_destinations(current['owner']):
+            raise HTTPException(404, 'Destination not found')
+        with store.connect() as db:
+            no_active_destination(db, [destination_id], current)
+            db.execute('DELETE FROM user_destinations WHERE id=? AND owner=?', (destination_id, current['owner']))
+        return {'status': 'deleted'}
+
     def public_destination(destination, administrator=False):
-        keys = ("id", "name", "kind", "readonly", "default") + (("root", "url", "username") if administrator else ())
+        keys = ("id", "name", "kind", "readonly", "default", "personal", "connected") + (("root", "url", "username") if administrator else ())
         return {k: destination[k] for k in keys if k in destination}
 
     @app.get("/api/v1/destinations")
     def destinations(current=Depends(user)):
-        entries = sorted(store.destinations().values(), key=lambda d: (not d.get("readonly", False), not d.get("default", False)))
+        entries = sorted(store.destinations(current["owner"], current["session_id"]).values(), key=lambda d: (not (d.get("personal") and d.get("default")), not d.get("readonly", False), not d.get("default", False)))
         return [public_destination(d) for d in entries]
 
     @app.get("/api/v1/admin/destinations")
@@ -504,6 +649,8 @@ def create_app(settings=None):
         destination = {**old, **{k: v for k, v in body.items() if k in ("name", "kind", "root", "url", "username", "password", "default")}, "id": destination_id, "readonly": False}
         if not body.get("password") and old.get("password"):
             destination["password"] = old["password"]
+        if destination.get('kind') == 'webdav':
+            raise ValueError('Configure WebDAV in your personal connections')
         validate_destination(destination)
         with store.connect() as db:
             if destination.get("default"):

@@ -1057,3 +1057,55 @@ a {
     width: 100%;
   }
 }
+
+.personal-webdav {
+  padding-bottom: 20px;
+}
+.personal-webdav form {
+  display: grid;
+  gap: 8px;
+}
+.personal-webdav label {
+  margin: 8px 0;
+}
+.personal-webdav small {
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+.webdav-connection {
+  margin: 16px 0;
+  padding: 12px;
+  border: 1px solid #dfe3d8;
+  border-radius: 8px;
+}
+.webdav-connection .destination-row {
+  padding: 0 0 8px;
+}
+.connection-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.folder-list {
+  display: grid;
+  gap: 8px;
+  margin: 16px 0;
+}
+.folder-list button {
+  justify-content: flex-start;
+  min-height: 48px;
+}
+.folder-list button svg:last-child {
+  margin-left: auto;
+}
+.current-folder {
+  overflow-wrap: anywhere;
+  background: #edf0e7;
+  padding: 12px;
+  border-radius: 8px;
+}
+.operator-destinations {
+  border-top: 1px solid #dfe3d8;
+  padding-top: 16px;
+}

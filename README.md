@@ -30,7 +30,7 @@ or HTTPS WebDAV. Curved paper and blurred text restoration are outside its scope
 Hosted mode requires `SCANDOC_HOSTED=true`, `SCANDOC_ORIGIN=https://...`,
 `SCANDOC_PAPERLESS_URL`, and a Fernet `SCANDOC_ENCRYPTION_KEY` provided outside Git.
 The same image serves API and built frontend; hosted access uses Paperless accounts.
-`SCANDOC_DATA_DIR` stores SQLite state, encrypted credentials and unfinished files.
+`SCANDOC_DATA_DIR` stores SQLite state, encrypted Paperless tokens, connection metadata and retained document files. WebDAV passwords never enter this directory.
 One processing worker runs per instance. OpenAPI is at `/docs` and `/openapi.json`.
 
 `SCANDOC_CONFIG_FILE` may point to a protected JSON file containing `destinations`:
@@ -39,9 +39,23 @@ One processing worker runs per instance. OpenAPI is at `/docs` and `/openapi.jso
 {"destinations":[{"id":"archive","name":"Local archive","kind":"folder","root":"/absolute/export/folder","default":true}]}
 ```
 
-File entries override UI settings and are read-only. WebDAV entries use `url`,
-`username` and `password`; protect this file like any other secret. Use
-`SCANDOC_CA_FILE` for a trusted private CA. Ordinary users never choose server paths.
+File entries override administrator server-folder settings and are read-only.
+Shared WebDAV entries are rejected: every user connects their own account from
+Destination settings and chooses an existing remote folder. Use
+`SCANDOC_CA_FILE` to add a trusted private CA alongside the standard HTTPS roots. Ordinary users never choose server paths.
+WebDAV login forms support phone/password-manager autofill using username and
+current-password fields. Use a personal app password where supported. Scandoc
+keeps it only in session memory shared with its one processing worker; it is never
+written into SQLite, files, browser storage or API responses. Logout/expiry clears
+that session's credentials. Backend restart clears all WebDAV credentials while
+preserving account metadata, selected folders and document sources. Sign in again
+from Destination settings and retry interrupted uploads; uncertain outcomes are
+reconciled against the existing destination file before resending. Sessions on
+another device, even for the same user, require their own WebDAV login. Disconnect
+removes saved account/destination metadata without deleting remote documents.
+The phone password manager owns password persistence; Scandoc cannot guarantee
+its autofill/save prompt on every browser, so verify it on the actual phone.
+
 The configurable limits are `SCANDOC_MAX_PAGES=20`,
 `SCANDOC_MAX_IMAGE_BYTES=26214400`, `SCANDOC_MAX_PIXELS=24000000`, and
 `SCANDOC_MAX_DOCUMENT_BYTES=209715200`.

@@ -30,7 +30,7 @@ dependencies = [
 
 [project.optional-dependencies]
 desktop = ["matplotlib==3.10.8"]
-web = ["fastapi>=0.115,<1", "uvicorn>=0.34,<1", "python-multipart>=0.0.20", "httpx>=0.28,<1", "cryptography>=44", "pydantic-settings>=2.8,<3"]
+web = ["defusedxml==0.7.1", "fastapi>=0.115,<1", "uvicorn>=0.34,<1", "python-multipart>=0.0.20", "httpx>=0.28,<1", "cryptography>=44", "pydantic-settings>=2.8,<3"]
 test = ["pytest>=8,<10", "httpx>=0.28,<1", "pypdf>=5,<7"]
 
 [tool.setuptools.package-data]
