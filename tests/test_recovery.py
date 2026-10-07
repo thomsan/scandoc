@@ -87,7 +87,7 @@ def test_description_confirmation_failure_retains_draft_and_never_resends(tmp_pa
     result = store.job(job,'local')
     assert result['status'] == 'delivered'
     assert result['archive']['filename'] == '2026-10-06 Shop - Cables_01.pdf'
-    assert client.get(f'/api/v1/drafts/{draft}').status_code == 404
+    assert client.get(f'/api/v1/drafts/{draft}').json()['archived'] is True
 
 
 def test_interrupted_processing_restarts(tmp_path):
@@ -143,7 +143,7 @@ def test_ambiguous_paperless_post_never_blindly_resends(tmp_path, monkeypatch):
     client.post(f'/api/v1/jobs/{job}/retry').raise_for_status()
     run_worker_until(app.state.store, job, 'delivered')
     assert len(sent) == 1
-    assert client.get(f'/api/v1/drafts/{draft}').status_code == 404
+    assert client.get(f'/api/v1/drafts/{draft}').json()['archived'] is True
 
 
 def test_restart_after_submission_marker_reconciles(tmp_path, monkeypatch):
@@ -158,13 +158,16 @@ def test_restart_after_submission_marker_reconciles(tmp_path, monkeypatch):
     run_worker_until(app.state.store, job, 'delivered')
 
 
-def test_completed_delivery_cleanup_recovers_on_restart(tmp_path):
+def test_completed_delivery_sources_survive_restart(tmp_path):
     app, client, draft, job = queued(tmp_path)
     value = json.loads(row(app.state.store, job)['value'])
     worker.update(app.state.store, job, 'delivered', value)
     run_worker_until(app.state.store, job, 'delivered')
-    assert not (tmp_path/'drafts'/draft).exists()
-    assert app.state.store.draft(draft, 'local') is None
+    from scandoc.web.store import Store
+    recovered = Store(app.state.settings)
+    assert (tmp_path/'drafts'/draft).exists()
+    assert recovered.draft(draft, 'local')['archived'] is True
+    assert recovered.history('local')[0]['available'] is True
 
 
 def test_folder_recovers_abandoned_staging_file(tmp_path):
@@ -238,4 +241,4 @@ def test_lost_note_response_reconciles_without_resending_document(tmp_path, monk
     client.post(f'/api/v1/jobs/{job}/retry').raise_for_status()
     run_worker_until(app.state.store, job, 'delivered')
     assert len(uploads) == len(writes) == len(notes) == 1
-    assert client.get(f'/api/v1/drafts/{draft}').status_code == 404
+    assert client.get(f'/api/v1/drafts/{draft}').json()['archived'] is True

@@ -83,33 +83,44 @@ for (const destination of [
         resolve("../tests/fixtures/landscape.png"),
       ]);
     await expect(page.getByRole("button", { name: /^Page 2/ })).toBeVisible();
-    await expect(
-      page.getByRole("button", { name: "Preview", exact: true }),
-    ).toBeEnabled();
-    await page.getByRole("slider", { name: "Corner 1", exact: true }).focus();
-    await page.keyboard.press("ArrowRight");
     await page
       .getByRole("button", { name: "Move page 2 up", exact: true })
       .click();
+    await page
+      .getByRole("button", { name: "Review pages", exact: true })
+      .click();
+    await page.getByRole("slider", { name: "Corner 1", exact: true }).focus();
+    await page.keyboard.press("ArrowRight");
     await page.getByRole("button", { name: "Preview", exact: true }).click();
     await expect(page.getByAltText("Corrected document preview")).toBeVisible();
+    await page
+      .getByRole("button", { name: "Continue to save", exact: true })
+      .click();
     const description = `Hosted ${destination} ${test.info().project.name} ${Date.now()}`;
     await page.getByLabel("Description", { exact: true }).fill(description);
     await page
       .getByRole("combobox", { name: "Destination", exact: true })
       .selectOption(destination);
     if (destination === "paperless") {
-      await expect(page.getByLabel("Document date", { exact: true })).toHaveCount(0);
+      await expect(
+        page.getByLabel("Document date", { exact: true }),
+      ).toHaveCount(0);
       await page
         .getByRole("combobox", { name: "Document type", exact: true })
         .selectOption({ label: "Receipt" });
     } else {
-      await expect(page.getByLabel("Document type", { exact: true })).toHaveCount(0);
-      await page.getByLabel("Document date", { exact: true }).fill("2026-10-06");
+      await expect(
+        page.getByLabel("Document type", { exact: true }),
+      ).toHaveCount(0);
+      await page
+        .getByLabel("Document date", { exact: true })
+        .fill("2026-10-06");
     }
     const created = page.waitForResponse(
       (r: any) => r.url().endsWith("/jobs") && r.request().method() === "POST",
     );
+    const automaticDownload =
+      destination === "download" ? page.waitForEvent("download") : null;
     await page
       .getByRole("button", {
         name: destination === "download" ? "Create PDF" : "Save document",
@@ -126,33 +137,42 @@ for (const destination of [
         { timeout: 200000, intervals: [1000] },
       )
       .toBe(destination === "download" ? "ready" : "delivered");
-    if (destination === "download") {
-      await expect(
-        page.getByRole("link", { name: "Download PDF" }),
-      ).toBeVisible();
-      const event = page.waitForEvent("download");
-      await page.getByRole("link", { name: "Download PDF" }).click();
-      expect((await event).suggestedFilename()).toBe(`2026-10-06 ${description}.pdf`);
-    } else
-      await expect(
-        page.getByRole("button", { name: "New document", exact: true }),
-      ).toBeVisible({ timeout: 10000 });
+    if (automaticDownload)
+      expect((await automaticDownload).suggestedFilename()).toBe(
+        `2026-10-06 ${description}.pdf`,
+      );
+    await expect(
+      page.getByRole("button", { name: "New document", exact: true }),
+    ).toBeVisible({ timeout: 10000 });
+    const retained = await (
+      await page.request.get(`/api/v1/drafts/${job.draft_id}`)
+    ).json();
+    expect(retained.archived).toBe(true);
+    expect(retained.pages).toHaveLength(2);
     if (destination === "paperless") {
       await page.evaluate(() => navigator.serviceWorker.ready);
-      const delivered = await (await page.request.get("/api/v1/jobs/" + job.id)).json();
-      await page.locator("details.history > summary").click();
+      const delivered = await (
+        await page.request.get("/api/v1/jobs/" + job.id)
+      ).json();
+      await expect(page.locator("details.history")).toHaveAttribute("open", "");
       const opened = page.waitForEvent("popup");
       await page.locator(`a[href="${delivered.location}"]`).click();
       const archive = await opened;
       await archive.locator('input[name="login"]').fill("scanner-team");
-      await archive.locator('input[name="password"]').fill(credentials.TEST_TEAM_PASSWORD);
+      await archive
+        .locator('input[name="password"]')
+        .fill(credentials.TEST_TEAM_PASSWORD);
       await archive.locator('button[type="submit"]').click();
       await expect(archive).toHaveURL(delivered.location);
-      await expect(archive.locator("pngx-document-detail")).toBeVisible({ timeout: 20000 });
+      await expect(archive.locator("pngx-document-detail")).toBeVisible({
+        timeout: 20000,
+      });
       await archive.close();
       await context.setOffline(true);
       await page.reload();
-      await expect(page.getByRole("button", { name: "New document", exact: true })).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: "New document", exact: true }),
+      ).toBeVisible();
       await context.setOffline(false);
     }
   });
@@ -167,6 +187,7 @@ test("logout hides retained drafts; another account cannot read them; same accou
     .locator("input[type=file]")
     .first()
     .setInputFiles(resolve("../tests/fixtures/receipt.png"));
+  await page.getByRole("button", { name: "3 · Save", exact: true }).click();
   const name = `Private draft ${test.info().project.name} ${Date.now()}`;
   await page.getByLabel("Description", { exact: true }).fill(name);
   await expect
@@ -208,11 +229,14 @@ test("failed destination retains draft and expired session prompts login", async
     .locator("input[type=file]")
     .first()
     .setInputFiles(resolve("../tests/fixtures/receipt.png"));
+  await page.getByRole("button", { name: "3 · Save", exact: true }).click();
   await page
     .getByRole("combobox", { name: "Destination", exact: true })
     .selectOption("browser-unavailable");
   await page.getByLabel("Document date", { exact: true }).fill("2026-10-06");
-  await page.getByLabel("Description", { exact: true }).fill("Unavailable export");
+  await page
+    .getByLabel("Description", { exact: true })
+    .fill("Unavailable export");
   await page
     .getByRole("button", { name: "Save document", exact: true })
     .click();

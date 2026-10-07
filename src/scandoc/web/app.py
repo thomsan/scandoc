@@ -210,18 +210,18 @@ def create_app(settings=None):
     @app.get("/api/v1/drafts")
     def list_drafts(current=Depends(user)):
         with store.connect() as db:
-            return [json.loads(r["value"]) for r in db.execute("SELECT value FROM drafts WHERE owner=?", (current["owner"],))]
+            return [json.loads(r["value"]) for r in db.execute("SELECT value FROM drafts WHERE owner=? AND id NOT IN (SELECT id FROM deleted_documents)", (current["owner"],))]
 
     @app.post("/api/v1/drafts")
     def create_draft(body: DraftInput, current=Depends(user)):
         draft_id = str(body.id)
         with store.connect() as db:
             existing = db.execute("SELECT owner FROM drafts WHERE id=?", (draft_id,)).fetchone()
-            delivered = db.execute("SELECT 1 FROM jobs WHERE draft=? AND status='delivered'", (draft_id,)).fetchone()
+            deleted = db.execute('SELECT 1 FROM deleted_documents WHERE id=?', (draft_id,)).fetchone()
         if existing and existing["owner"] != current["owner"]:
             raise HTTPException(409, "Identifier unavailable")
-        if delivered:
-            raise HTTPException(409, "Draft was delivered")
+        if deleted:
+            raise HTTPException(409, "This document was deleted")
         draft = store.draft(draft_id, current["owner"]) or {"id": draft_id, "title": body.title, "note": body.note or body.title, "pages": [], "created": time.time()}
         (settings.data_dir / "drafts" / draft_id).mkdir(parents=True, exist_ok=True, mode=0o700)
         store.save_draft(draft, current["owner"])
@@ -246,11 +246,32 @@ def create_app(settings=None):
     @app.delete("/api/v1/drafts/{draft_id}")
     def delete_draft(draft_id: str, current=Depends(user)):
         draft = draft_for(draft_id, current, True)
-        shutil.rmtree(settings.data_dir / "drafts" / draft["id"], ignore_errors=True)
-        with store.connect() as db:
-            db.execute("DELETE FROM drafts WHERE id=? AND owner=?", (draft["id"], current["owner"]))
-            db.execute("UPDATE jobs SET status='discarded' WHERE draft=? AND status='ready'", (draft["id"],))
+        store.delete_documents([draft['id']], current['owner'])
         return {"status": "deleted"}
+
+    @app.get('/api/v1/history')
+    def history(current=Depends(user)):
+        return [{**entry, 'jobs':[public_job(job) for job in entry['jobs']]} for entry in store.history(current['owner'])]
+
+    @app.delete('/api/v1/history')
+    def delete_history(current=Depends(user)):
+        ids = [d['id'] for d in store.history(current['owner'])]
+        try:
+            store.delete_documents(ids, current['owner'])
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
+        return {'status':'deleted', 'ids':ids}
+
+    @app.delete('/api/v1/history/{document_id}')
+    def delete_history_item(document_id: str, current=Depends(user)):
+        document_id = identifier(document_id)
+        if document_id not in {d['id'] for d in store.history(current['owner'])}:
+            raise HTTPException(404, 'History item not found')
+        try:
+            store.delete_documents([document_id], current['owner'])
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
+        return {'status':'deleted', 'ids':[document_id]}
 
     @app.put("/api/v1/drafts/{draft_id}/pages/{page_id}")
     def upload_page(draft_id: str, page_id: str, file: UploadFile = File(), current=Depends(user)):
@@ -377,12 +398,12 @@ def create_app(settings=None):
                 db.execute("INSERT INTO jobs VALUES(?,?,?,?,?)", (job_id, current["owner"], draft["id"], "queued", json.dumps(value)))
             except Exception:
                 raise HTTPException(409, "Delivery identifier unavailable")
-        return {"id": job_id, "status": "queued"}
+        return {"id": job_id, "draft_id": draft["id"], "status": "queued"}
 
     @app.get("/api/v1/jobs")
     def jobs(current=Depends(user)):
         with store.connect() as db:
-            ids = [r["id"] for r in db.execute("SELECT id FROM jobs WHERE owner=? ORDER BY rowid DESC LIMIT 100", (current["owner"],))]
+            ids = [r["id"] for r in db.execute("SELECT id FROM jobs WHERE owner=? AND draft NOT IN (SELECT id FROM deleted_documents) ORDER BY rowid DESC LIMIT 100", (current["owner"],))]
         return [public_job(store.job(i, current["owner"])) for i in ids]
 
     @app.get("/api/v1/jobs/{job_id}")

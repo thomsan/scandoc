@@ -50,15 +50,18 @@ The Android PWA needs trusted HTTPS and a first online load. It retains unfinish
 images, ordering, edits and metadata in account-separated IndexedDB indefinitely.
 Manual editing works offline; automatic detection, previews, PDFs and delivery
 resume after reconnection. Logout hides retained drafts. Storage errors are shown
-instead of silently dropping pages. Device downloads retain drafts until deletion;
-confirmed folder, WebDAV and Paperless delivery delete server and phone source files.
+instead of silently dropping pages. Completed downloads and deliveries move to **History**. Original images, edits
+and PDFs remain in Scandoc until you explicitly delete the History item.
+**Export again** sends the same document to another destination. **Delete all**
+removes only your History items and Scandoc files; unfinished drafts and remote
+Paperless/WebDAV/folder copies remain. Active or uncertain deliveries block deletion.
 An uncertain Paperless upload must be reconciled before any resend.
 
 The save form follows the selected destination. Paperless requires a document
 type and accepts an optional **Description**, such as “Extension cables” for a
 receipt. Its company archive owns OCR date extraction, title policy and filenames;
 Scandoc attaches the dedicated Description custom field before ingestion and
-confirms it before deleting sources. The delivery receipt shows the resulting
+confirms it before reporting delivery. The delivery receipt shows the resulting
 archive filename. Download, folder and WebDAV exports require a document date
 and Description and generate `YYYY-MM-DD DESCRIPTION.pdf`, with safe characters.
 A conflicting folder/WebDAV name fails without overwriting or deleting the draft.
